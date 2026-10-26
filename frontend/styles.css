@@ -1,0 +1,72 @@
+:root { color-scheme: dark; --green: #a3d5bd; --muted: #6b9687; --line: #27493b; --cyan: #92d8f8; --amber: #ffd46a; --red: #ff5967; }
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #030a08; }
+body { display: flex; flex-direction: column; color: var(--green); font-family: Consolas, "Lucida Console", ui-monospace, monospace; background: radial-gradient(ellipse at 50% 20%, #12291d 0, #06110d 55%, #030a08 100%); }
+button { font: inherit; }
+[hidden], .hidden { display: none !important; }
+.console-header { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; gap: 24px; padding: 18px 28px 16px; border-bottom: 1px solid var(--line); background: #08150fd9; }
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand-mark { font-size: 32px; color: #b7e3c3; text-shadow: 0 0 16px #9ddb9766; }
+.eyebrow { display: block; color: var(--muted); font-size: 9px; letter-spacing: .18em; margin-bottom: 5px; }
+h1 { font-size: 19px; letter-spacing: .2em; font-weight: 400; margin: 0; color: #d2efcc; }
+.operation { text-align: center; font-size: 12px; letter-spacing: .15em; }
+.signal { display: flex; align-items: center; gap: 10px; font-size: 10px; letter-spacing: .12em; color: #afd3ad; }
+.signal-dot { width: 5px; height: 5px; background: #9fddaa; box-shadow: 0 0 8px #9fddaa; }
+body[data-connected="false"] .signal-dot { background: var(--amber); box-shadow: none; }
+.signal-bars { letter-spacing: .08em; color: #57815b; }
+.canvas-wrap { position: relative; flex: 1; min-height: 0; margin: 16px 24px 0; border: 1px solid #4c6a48; background: #07140d; box-shadow: inset 0 0 40px #010602, 0 0 0 4px #14271a88, 0 0 0 5px #233b2766; }
+.canvas-wrap::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: radial-gradient(ellipse, transparent 45%, #010a0466 100%); }
+canvas { width: 100%; height: 100%; display: block; outline: none; cursor: default; touch-action: none; }
+.mission-brief{margin:10px 22px 0;padding:10px 12px;border-left:2px solid #ddb56b;background:#18231f;color:#adc6bf;display:flex;flex-direction:column;gap:5px;font-size:11px;line-height:1.5}.mission-brief strong{color:#e6ce9a;letter-spacing:.1em;font-size:10px}.mission-brief #missionRequirements{color:#e8aa8c}.mission-brief #missionRequirements:empty{display:none}@media(max-width:760px){.mission-brief{margin:8px 12px 0;font-size:10px}}
+.radar-caption { position: absolute; z-index: 1; top: 10px; left: 14px; right: 14px; display: flex; justify-content: space-between; pointer-events: none; font-size: 9px; letter-spacing: .12em; color: #709673; }
+#alertHud { position: absolute; z-index: 2; top: 32px; right: 18px; min-width: 170px; padding: 12px 14px 10px; border: 1px solid #618668; border-left: 3px solid #9fc7a2; background: #09170fe8; color: #c2dfb8; pointer-events: none; }
+#alertTitle { display: block; font-size: 23px; font-weight: 400; letter-spacing: .14em; line-height: 1; }
+#alertDetail { display: block; max-width: 240px; margin-top: 7px; color: currentColor; opacity: .8; font-size: 9px; line-height: 1.6; }
+.phase-meter { display: flex; gap: 3px; margin-top: 10px; }
+.phase-meter i { display: block; width: 16px; height: 3px; background: currentColor; opacity: .35; }
+.phase-meter i:nth-child(-n+3) { opacity: .8; }
+#alertHud[data-phase="ALLERTA"], #alertHud[data-phase="SPOTTED"] { color: var(--red); border-color: #a73443; background: repeating-linear-gradient(0deg, #350a12ee 0 2px, #29080eee 2px 4px); box-shadow: 0 0 28px #ff18331a; }
+#alertHud[data-phase="ALLERTA"] .phase-meter i, #alertHud[data-phase="SPOTTED"] .phase-meter i { opacity: .9; }
+#alertHud[data-phase="EVASIONE"], #alertHud[data-phase="CAUTELA"] { color: var(--amber); border-color: #90713a; background: #251d0cea; }
+#alertHud[data-phase="EVASIONE"] .phase-meter i:nth-child(-n+6), #alertHud[data-phase="CAUTELA"] .phase-meter i:nth-child(-n+5) { opacity: .85; }
+body[data-alarm="true"] .canvas-wrap { border-color: #9d3944; background: #19080d; box-shadow: inset 0 0 40px #0c0103, 0 0 0 4px #36121c88, 0 0 0 5px #59242e66; }
+.banner { position: absolute; z-index: 4; bottom: 22px; left: 50%; transform: translateX(-50%); width: max-content; max-width: calc(100% - 80px); padding: 14px 20px; border: 1px solid var(--cyan); color: var(--cyan); background: #071914f2; font-size: 14px; line-height: 1.6; text-align: center; }
+#fullscreenBtn { position: absolute; z-index: 3; right: 12px; bottom: 12px; width: 30px; height: 30px; padding: 0; background: #07100fcc; color: #8caa8c; border: 1px solid #416347; font-size: 22px; cursor: pointer; }
+button:hover, button:focus-visible { color: #d6f3d3 !important; border-color: #aed6a3 !important; outline: 1px solid #aed6a3; outline-offset: 3px; }
+.console-footer { flex-shrink: 0; display: flex; align-items: center; gap: 36px; margin: 16px 24px 0; padding: 12px 4px; border-top: 1px solid var(--line); }
+.mission { min-width: 150px; }
+.mission strong { font-size: 12px; font-weight: 400; letter-spacing: .12em; color: #daebc9; }
+.intel-track { margin-top: 7px; height: 2px; background: #253d2b; }
+.intel-track span { display: block; height: 100%; width: 0; background: #dfd285; transition: width .2s; }
+.equipment { font-size: 10px; line-height: 1.4; }
+.legend { margin-left: auto; display: flex; gap: 18px; font-size: 10px; color: #99b0a4; }
+.legend span { display: flex; align-items: center; gap: 6px; }
+.legend i { width: 7px; height: 7px; clip-path: polygon(0 0, 100% 50%, 0 100%); }
+.normal { background: var(--cyan); }.suspicious { background: var(--amber); }.alert { background: var(--red); }
+#visionBtn { flex-shrink: 0; border: 1px solid #3b5842; background: #0c1a11; color: #94b59c; padding: 9px 10px; font-size: 10px; cursor: pointer; }
+#visionBtn span { color: var(--cyan); margin-left: 8px; }
+.controls { flex-shrink: 0; display: flex; justify-content: center; flex-wrap: wrap; gap: 10px 20px; padding: 5px 20px 14px; font-size: 9px; color: #6f8b79; }
+kbd { color: #b1c3a5; font: inherit; border-bottom: 1px solid #405a41; padding-bottom: 2px; margin-right: 4px; }
+@media (max-width: 760px) { .console-header { padding: 12px 16px; gap: 8px; } h1 { font-size: 14px; }.brand-mark { font-size: 24px; }.operation { display: none; }.signal-bars { display: none; }.canvas-wrap { margin: 12px 12px 0; }.console-footer { margin: 12px 12px 0; gap: 12px; flex-wrap: wrap; }.equipment { margin-left: auto; }.legend { margin: 0; gap: 14px; flex: 1; }#alertHud { min-width: 125px; top: 30px; right: 10px; padding: 9px 10px; }#alertTitle { font-size: 18px; }#alertDetail { max-width: 180px; }.controls { gap: 9px; padding: 5px 12px 10px; }.eyebrow { font-size: 8px; }.radar-caption { font-size: 8px; } }
+@media (max-height: 540px) { .console-header { padding: 8px 18px; }.brand-mark { font-size: 24px; }.console-footer { margin-top: 10px; padding: 7px 4px; }.controls { display: none; }#alertHud { padding: 8px 10px; }#alertTitle { font-size: 17px; } }
+
+.player-hud {position:absolute;z-index:3;top:32px;left:18px;width:250px;padding:13px 15px;background:linear-gradient(125deg,#0a1b22f5,#071311ee);border:1px solid #385a60;border-left:3px solid #6ed9f0;box-shadow:0 8px 28px #0008;pointer-events:none}
+.hud-title {display:flex;justify-content:space-between;gap:10px;font-size:9px;color:#94c5c8;margin-bottom:13px}
+#playerCondition {font-size:8px;color:#ffc87a;text-align:right}
+.hud-vital {display:flex;align-items:center;gap:9px;margin:8px 0;font-size:9px}.hud-vital>span{width:43px}.hud-vital strong{width:32px;text-align:right;font-weight:400;color:#d9eae8}
+.hud-track {height:6px;flex:1;background:#253139;box-shadow:inset 0 1px 2px #0009;overflow:hidden}.hud-track i{display:block;height:100%;width:100%;transition:width .1s;background:linear-gradient(90deg,#24b785,#9ce7af)}.stamina .hud-track i{background:linear-gradient(90deg,#268db4,#8de2ee)}
+.backpack {flex:1;min-width:0}.pack-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px}.pack-heading .eyebrow{margin:0}#selectedItemLabel{font-size:10px;color:#d1e9e3}
+.pack-items{display:flex;gap:7px;overflow-x:auto;padding:9px 2px 6px;scrollbar-width:thin}.pack-slot{position:relative;flex:0 0 70px;min-height:60px;display:flex;flex-direction:column;align-items:center;gap:4px;padding:7px 6px;border:1px solid #314950;color:#82a5ad;background:linear-gradient(135deg,#112329,#0a1518);cursor:pointer;transition:background .15s,border-color .15s}.pack-slot.selected{color:#a7ebf5;border-color:#74d7ee;background:linear-gradient(135deg,#173f47,#10262d);box-shadow:inset 0 -2px #74d7ee,0 0 12px #4ac8dd1a}.pack-slot svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.pack-slot span{font-size:8px}.pack-slot b{position:absolute;top:4px;right:5px;font-size:9px;font-weight:400;color:#e1ebe7}.pack-empty{font-size:10px;color:#77908a;padding:12px}.equipment{display:none}.console-footer{gap:22px;margin-top:8px;padding-bottom:5px}.legend{flex-shrink:0}
+@media(max-width:1000px){.legend{display:none}.player-hud{width:210px}.pack-heading{flex-wrap:wrap}.console-footer{gap:12px}.pack-slot{flex-basis:62px}}
+@media(max-width:600px){.player-hud{left:9px;top:28px;width:160px;padding:9px}.hud-title{font-size:8px;flex-wrap:wrap;margin-bottom:7px}.hud-vital{font-size:8px;gap:5px}.hud-vital>span{width:37px}.backpack{flex-basis:100%}.console-footer .mission{display:none}#selectedItemLabel{font-size:9px}.pack-slot{min-height:50px}.pack-slot svg{width:20px;height:20px}}
+
+/* Telemetry occupies its own row; neither panel can cover the radar. */
+.telemetry-strip {flex-shrink:0;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;margin:12px 24px 0}
+.telemetry-strip .player-hud {position:static;width:auto;min-width:0;padding:8px 12px;box-shadow:none}
+.telemetry-strip #alertHud {position:static;min-width:0;padding:9px 12px;margin:0}
+.telemetry-strip .hud-title {margin-bottom:6px}
+.telemetry-strip .hud-vital {margin:5px 0}
+.telemetry-strip #alertTitle {font-size:18px}
+.telemetry-strip #alertDetail {max-width:none;margin-top:5px;line-height:1.4}
+.telemetry-strip .phase-meter {display:none}
+@media(max-width:760px){.telemetry-strip{margin:8px 12px 0;gap:8px}.telemetry-strip .player-hud,.telemetry-strip #alertHud{padding:7px 9px}.telemetry-strip #alertTitle{font-size:16px}.telemetry-strip .hud-title{margin-bottom:4px}.telemetry-strip #playerCondition{font-size:7px}.telemetry-strip .hud-vital{gap:5px;margin:4px 0}.telemetry-strip #alertDetail{font-size:8px}.canvas-wrap{margin-top:8px}}

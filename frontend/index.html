@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Shadow Protocol</title>
+  <meta name="theme-color" content="#06110f" />
+  <link rel="stylesheet" href="/static/styles.css?v=20261005-11" />
+</head>
+<body>
+  <header class="console-header">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">◈</span><div><span class="eyebrow">SHADOW PROTOCOL</span><h1>SOLITON RADAR</h1></div></div>
+    <div class="operation"><span class="eyebrow">OPERAZIONE / INFILTRAZIONE</span><span id="levelLabel">SETTORE 01</span></div>
+    <div class="signal"><span class="signal-dot" aria-hidden="true"></span><span id="connectionLabel">CONNESSIONE</span><span class="signal-bars" aria-hidden="true">▂▄▆█</span></div>
+  </header>
+  <div class="telemetry-strip" aria-label="Salute, vigore e situazione">
+    <section class="player-hud" aria-label="Condizioni del player">
+      <div class="hud-title"><span>◈ OPERATORE</span><span id="playerCondition">OPERATIVO</span></div>
+      <div class="hud-vital health"><span>SALUTE</span><div class="hud-track"><i id="playerHealthFill"></i></div><strong id="playerHealthValue">100%</strong></div>
+      <div class="hud-vital stamina"><span>VIGORE</span><div class="hud-track"><i id="playerStaminaFill"></i></div><strong id="playerStaminaValue">100%</strong></div>
+    </section>
+    <div id="alertHud" role="status" aria-live="polite">
+      <strong id="alertTitle"></strong>
+      <span id="alertDetail"></span>
+      <div class="phase-meter" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    </div>
+  </div>
+  <section class="mission-brief" aria-label="Obiettivo della missione"><strong id="missionTitle">MISSIONE 1 · ATRIO E RECEPTION</strong><span id="missionObjective">Trova la scheda di sicurezza nell’ufficio.</span><span id="missionRequirements"></span></section>
+  <main class="canvas-wrap" aria-label="Radar tattico">
+    <div class="radar-caption"><span>TACTICAL FIELD / LIVE</span><span id="radarCoords">X 02.0 / Y 27.0</span></div>
+    <canvas id="game" tabindex="0" aria-label="Shadow Protocol. Muoviti con WASD o le frecce."></canvas>
+    <div id="banner" class="banner hidden" role="status"></div>
+    <button id="fullscreenBtn" type="button" aria-label="Schermo intero" title="Schermo intero (F11)">&#x26F6;</button>
+  </main>
+  <footer class="console-footer">
+    <div class="mission"><span class="eyebrow">DATI MISSIONE</span><strong id="intelLabel">INTEL 00 / 01</strong><div class="intel-track"><span id="intelProgress"></span></div></div>
+    <section class="backpack" aria-label="Zaino e oggetto selezionato"><div class="pack-heading"><span class="eyebrow">ZAINO · SELEZIONA CON IL MOUSE</span><span id="selectedItemLabel">Coltello</span></div><div id="backpackItems" class="pack-items"></div><span id="equipmentLabel" class="equipment">COLTELLO</span></section>
+    <div class="legend" aria-label="Legenda coni visivi"><span><i class="normal"></i>Normale</span><span><i class="suspicious"></i>Sospetto</span><span><i class="alert"></i>Allerta</span></div>
+    <button id="visionBtn" type="button" aria-pressed="true" title="Mostra o nascondi i coni visivi (V)">CONI <span>ON</span></button>
+  </footer>
+  <div class="controls"><span><kbd>WASD</kbd> Movimento</span><span><kbd>SHIFT</kbd> Corsa</span><span><kbd>C</kbd> Accovacciati / rialzati</span><span><kbd>E</kbd> Raccogli / usa selezione</span><span><kbd>TIENI E</kbd> Postazione medica</span><span><kbd>F</kbd> Coltello</span><span><kbd>TIENI F</kbd> Soffoca</span><span><kbd>SPAZIO</kbd> Tuffo / rialzati</span><span><kbd>Q</kbd> Lancia diversivo</span><span><kbd>R</kbd> Riavvia</span></div>
+  <script src="/static/app.js?v=20261005-11"></script>
+</body>
+</html>

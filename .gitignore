@@ -1,0 +1,35 @@
+# Local Python environment and generated caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime logs, screenshots and learned episode artifacts
+# Preserve these locally; trained policies and match history are not source code.
+.runtime/
+
+# Generated training output; include only the final models needed to play
+/models/
+/models_v*/
+!/models_v7_1_guard/
+/models_v7_1_guard/*
+!/models_v7_1_guard/guard_v7_1_final.zip
+!/models_v7_1_swat/
+/models_v7_1_swat/*
+!/models_v7_1_swat/swat_v7_1_final.zip
+
+# Local editor and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local secrets
+.env
+.env.*
+!.env.example
