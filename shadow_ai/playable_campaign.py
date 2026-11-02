@@ -73,6 +73,10 @@ def campaign_supplies(navigator,level):
                   ("MAGAZINE",(56,6),1),("BANDAGE",(55,27),1),("SNACK",(30,34),1)]
     if level == 3:
         placements += [("HAZMAT",(32,23),1),("SAMPLE_VIAL",(39,17),1)]
+    weapon, point, ammunition = {1: ('PISTOL_SUPPRESSED',(7,4),16),
+                                 2: ('SMG_SUPPRESSED',(34,6),31),
+                                 3: ('PISTOL_SUBSONIC',(32,22),16)}[level]
+    placements += [(weapon, point, ammunition), ('AMMO',(point[0]+1,point[1]),ammunition*2)]
     return [dict(id=f'supply-{i}',kind=kind,pos=navigator.goal(np.array(point,dtype=np.float32)),
                  amount=amount,source='MAP',fixed=kind=='MEDKIT',zone='INFERMERIA' if kind=='MEDKIT' else 'PREPARAZIONE' if kind in {'HAZMAT','SAMPLE_VIAL'} else 'SERVIZI')
             for i,(kind,point,amount) in enumerate(placements)]

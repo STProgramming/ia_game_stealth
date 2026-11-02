@@ -67,16 +67,18 @@ def test_security_assigns_real_intel_and_exfil_and_adapts_to_theft(game):
     game._publish_contact(np.array([30., 12.], dtype=np.float32), "G0")
     for g in game.aux_guards:
         game._guard_goal_from_radio(g)
-    assert any(g.state == "SECURE EXFIL" and np.array_equal(g.target, game.env._exit)
+    assert all(g.state == 'PROTECT INTEL' for g in game.aux_guards)
+    assert all(np.array_equal(game._security_assignment(g)['anchor'], game.env._intel[2])
                for g in game.aux_guards)
-    assert any(g.state == "PROTECT INTEL" and np.array_equal(g.target, game.env._intel[2])
-               for g in game.aux_guards)
+    assert min(np.linalg.norm(a.target - b.target) for i, a in enumerate(game.aux_guards)
+               for b in game.aux_guards[i + 1:]) >= 1.1
     game.env.player_has_intel[:] = 1
     game.env.known_intel_present[:] = 0
     for g in game.aux_guards:
         game._guard_goal_from_radio(g)
         assert g.state == "SECURE EXFIL"
-        assert np.array_equal(g.target, game.env._exit)
+        assert np.array_equal(game._security_assignment(g)['anchor'], game.env._exit)
+        assert .9 <= np.linalg.norm(g.target - game.env._exit) <= 5.
 
 
 def deploy(game, point):
@@ -86,7 +88,7 @@ def deploy(game, point):
     game.env.player_pos = np.array([2., 27.], dtype=np.float32)
 
 
-def test_swat_follows_searching_guard_without_hidden_player_truth(game):
+def test_swat_uses_report_instead_of_following_a_sentry_patrol_or_hidden_player(game):
     deploy(game, [20, 12])
     game.team_contact_age = 1
     tracker = game.aux_guards[0]
@@ -97,7 +99,8 @@ def test_swat_follows_searching_guard_without_hidden_player_truth(game):
     unit = game.swat_units[0][1]
     game._step_aux_guard(unit)
     assert unit.state == "RESPOND"
-    assert np.array_equal(unit.target, tracker.target)
+    assert np.array_equal(unit.target, game.team_contact)
+    assert not np.array_equal(unit.target, tracker.target)
     assert not np.array_equal(unit.target, game.env.player_pos)
 
 
@@ -113,10 +116,12 @@ def test_tactical_stack_grenades_and_distinct_corner_searches(game, point):
         unit.pos = game._room_entries[unit.guard_id]["stage"].copy()
     # The player can be affected only at the reported position, inside the room.
     game.env.player_pos = game.team_contact.copy()
-    for _ in range(20):
+    breach_steps = int(np.ceil((max(plan['wait'] for plan in plans) + .25) / game.game_dt)) + 2
+    for _ in range(breach_steps):
         for _, unit in game.swat_units:
             game._step_tactical_entry(unit)
-    assert len(game.flash_events) == len(game.smoke_clouds) == 1
+    assert len(game.flash_events) == 1
+    assert not game.smoke_clouds  # The entry team keeps its own sightlines clear.
     assert game.player_flash_timer > 0
     assert all(p["phase"] == "CLEAR ROOM" for p in plans)
     first_corners = {tuple(p["search"].points[1]) for p in plans}
@@ -129,7 +134,8 @@ def test_tactical_stack_grenades_and_distinct_corner_searches(game, point):
                 game._step_tactical_entry(unit)
         assert plan["phase"] == "DONE"
         assert unit.state == "SEARCH"
-    assert len(game.flash_events) == len(game.smoke_clouds) == 1
+    assert len(game.flash_events) == 1
+    assert not game.smoke_clouds
 
 
 def test_smoke_blocks_sensors_but_not_navigation_and_reset_clears_effects(game):

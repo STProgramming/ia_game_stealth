@@ -26,7 +26,7 @@ from shadow_ai.interactive_runtime import (
     InteractiveGuardRuntime,
     InteractiveSwatRuntime,
 )
-from shadow_ai.episode_learning import EpisodeLearning
+from shadow_ai.episode_learning import EpisodeLearning, compatible_policy_spaces
 from stable_baselines3 import PPO
 
 
@@ -79,6 +79,8 @@ class GameSession:
         self.input = InputState()
         self.static_key = None
         self.revision = 0
+        self.pending_lessons = []
+        self.previous_lesson = None
         self.set_mode(self.mode)
         self._start_episode_learning()
 
@@ -86,8 +88,39 @@ class GameSession:
         directory = ROOT / ".runtime" / "episodes"
         checkpoint = directory / f"{self.mode}_latest.zip"
         if checkpoint.exists():
-            self.runtime.model = PPO.load(checkpoint, device="cpu")
+            self._load_episode_checkpoint(checkpoint)
         self.learning = EpisodeLearning(self.runtime.model, self.mode, directory)
+
+    def _load_episode_checkpoint(self, checkpoint):
+        try:
+            candidate = PPO.load(checkpoint, device='cpu')
+            if not compatible_policy_spaces(candidate, self.runtime.model):
+                self.learning_checkpoint_status = 'INCOMPATIBLE'
+                return False
+            self.runtime.model = candidate
+            self.learning_checkpoint_status = 'LOADED'
+            return True
+        except Exception:
+            # A partial/corrupt episode must not prevent loading the validated
+            # base policy or interfere with separately deployed context models.
+            self.learning_checkpoint_status = 'UNREADABLE'
+            return False
+
+    def _apply_completed_lessons(self):
+        pending = []
+        for lesson, mode in getattr(self, 'pending_lessons', []):
+            if lesson.future is None:
+                if not lesson.finished:
+                    pending.append((lesson, mode))
+                continue
+            if not lesson.future.done():
+                pending.append((lesson, mode))
+                continue
+            result = lesson.state()
+            if result['status'] == 'TRAINED' and mode == self.mode:
+                if self._load_episode_checkpoint(result['episode_checkpoint']):
+                    self.learning.model = self.runtime.model
+        self.pending_lessons = pending
 
     def set_mode(self, mode: str) -> None:
         if mode == "guard" and self.guard_model is not None:
@@ -117,8 +150,14 @@ class GameSession:
             self.static_key = None
             self.revision += 1
         if typ == "next_level":
+            lesson = getattr(self, 'learning', None)
+            if lesson is not None and self.mode == 'guard' and self.runtime.status == 'ESCAPED' and self.runtime.level < 3:
+                lesson.finish('ESCAPED', self.runtime.level, self.runtime.seed)
+                self.previous_lesson = lesson
+                self.pending_lessons.append((lesson, self.mode))
             if self.mode == "guard" and self.runtime.advance_level():
                 self._start_episode_learning()
+                self._apply_completed_lessons()
             return
         if typ == "input":
             incoming = InputState.from_dict(data)
@@ -139,9 +178,21 @@ class GameSession:
             self._start_episode_learning()
 
     def tick(self) -> dict:
+        self._apply_completed_lessons()
+        recording = self.runtime.status == 'RUNNING'
+        if recording and not self.learning.player_path:
+            world, _ = self.runtime._combat_world()
+            self.learning.record_path(world.player_pos, 0.)
         self.runtime.tick(self.input)
-        for observation, action, actor in getattr(self.runtime, "learning_decisions", []):
-            self.learning.record(observation, action, actor)
+        if recording:
+            world, _ = self.runtime._combat_world()
+            self.learning.record_path(world.player_pos, self.runtime.game_dt)
+        actors = {uid: actor.pos for uid, actor, _ in self.runtime._combat_actors()}
+        overrides = getattr(self.runtime, '_legacy_policy_overrides', set())
+        for decision in getattr(self.runtime, 'learning_decisions', []):
+            observation, action, actor = decision[:3]
+            executed = (bool(decision[3]) if len(decision) > 3 else True) and actor not in overrides
+            self.learning.record(observation, action, actor, position=actors.get(actor), executed=executed)
         for event in getattr(self.runtime, "learning_events", []):
             self.learning.events.append(event)
         if self.runtime.status in {"CAPTURED", "ESCAPED", "NEUTRALIZED"}:
@@ -166,6 +217,10 @@ class GameSession:
         state = self.runtime.state(include_static=include_static)
         state["revision"] = self.revision
         state["learning"] = self.learning.state()
+        if hasattr(self, 'learning_checkpoint_status'):
+            state['learning']['checkpoint_status'] = self.learning_checkpoint_status
+        if self.previous_lesson is not None:
+            state['previous_learning'] = self.previous_lesson.state()
         state["level"] = getattr(self.runtime, "level", None)
         state["available_modes"] = {
             "guard": self.guard_model is not None,

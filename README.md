@@ -1,4 +1,4 @@
-# Shadow Protocol RL
+# Shadow Protocol RL · 3D
 
 ## Avvio rapido del gioco
 
@@ -18,12 +18,109 @@ Apri <http://127.0.0.1:8765> nel browser. Il server trova automaticamente
 `models_v7_1_guard/guard_v7_1_final.zip` e
 `models_v7_1_swat/swat_v7_1_final.zip`.
 
+Il gioco si presenta in 3D con camera prospettica che segue l’operatore,
+personaggi animati, ombre, muri con apertura della visuale nelle vicinanze,
+telecamere, obiettivi, porte, fumo ed effetti di combattimento. Il radar
+tattico rimane disponibile come minimappa. Le tre missioni, le collisioni e
+le decisioni dell’IA continuano a essere gestite dal server Python sul piano
+X/Y, visualizzato come piano X/Z: il movimento resta a terra.
+
+Usa la **rotella** per lo zoom e **T** (o il pulsante Panoramica) per alternare
+la camera di inseguimento e la vista dell’intero settore. **V** mostra o
+nasconde i coni visivi, bloccati da muri e porte chiuse. I comandi di gioco
+restano WASD/frecce, Shift, C, E, F, Spazio, Q e H/tasto destro per sparare.
+**R** avvia una ricarica tattica; **RR**, entro 280 ms, la converte in una
+ricarica rapida. **Invio** riprova dopo la sconfitta o prosegue al settore
+successivo dopo l’esfiltrazione.
+Serve un browser con **WebGL 2**; se non è disponibile viene mostrato il radar
+tattico con un messaggio esplicativo.
+
+Il motore [Three.js](https://threejs.org/manual/pages/installation.html) 0.186.1
+è incluso in `frontend/vendor/three/` con la licenza MIT. Non servono npm,
+un CDN o download di modelli per giocare. `frontend/scene3d.js` gestisce la
+grafica e `frontend/spatial.js` contiene le trasformazioni e la visibilità.
+Le superfici di pavimenti, pareti e tessuti sono generate localmente, con
+usura, rilievi, bordi smussati, pannelli e luci a parete. Le armi hanno
+modelli distinti, visibili anche a terra, e un’animazione di estrazione.
+
+Le armi hanno un colpo in canna, un caricatore e scorte separate per arma.
+La ricarica tattica conserva il caricatore parziale; quello vuoto si può
+selezionare nello zaino e lanciare con Q. La ricarica rapida lascia cadere
+il caricatore, produce rumore e perde i colpi rimasti al suo interno.
+Durante contatto e ricerca dopo l’avvistamento si eseguono solo ricariche
+rapide. Non si può sparare durante una ricarica e le munizioni non si rigenerano.
+
+L’arma equipaggiata rallenta camminata, corsa e movimento accovacciato.
+Il cambio nello zaino richiede l’estrazione: il tempo è proporzionale al peso,
+e prima di terminarlo non si può sparare o ricaricare. Il pannello mostra
+peso, mobilità e secondi mancanti. La pistola pesa 1 kg (0,42 s), il mitra
+2,8 kg (1,18 s), il fucile 3,7 kg (1,55 s) e il fucile a canna liscia
+4,1 kg (1,72 s); le varianti silenziate aggiungono 0,3 kg.
+
+Le munizioni generiche restano una scorta condivisa finché una ricarica
+le inserisce in un caricatore. Selezionare un’altra arma, aprire lo zaino
+o raccogliere un duplicato conserva tutti i colpi, compresi quelli nei
+caricatori di riserva. Una ricarica tattica interrotta conserva i caricatori;
+una rapida perde soltanto i colpi del caricatore lasciato cadere.
+
+Lo zaino contiene al massimo **10 tipi di oggetti**. Con **E** si raccolgono
+gli oggetti vicini: i duplicati aumentano la quantità e le armi già possedute
+aggiungono munizioni. Le pile occupano un posto ciascuna; i caricatori di
+riserva restano associati alla rispettiva arma. **G**, oppure il pulsante
+**LASCIA**, deposita a terra l'oggetto o l'intera pila selezionata, che si può
+raccogliere di nuovo. Il peso di tutto il carico riduce la mobilità; posti,
+peso e mobilità sono visibili sopra lo zaino. Gli obiettivi hanno precedenza
+sul bottino vicino, anche quando una guardia abbattuta li ricopre.
+
+Sono disponibili varianti silenziate e silenziate con munizioni subsoniche.
+Uno sparo silenziato viene riconosciuto come tale soltanto molto vicino;
+bossolo e impatto sul muro possono essere sentiti separatamente. Gli spari
+normali coprono questi rumori, ma i bossoli rimangono tracce visibili: una
+guardia deve vederli per segnalarli via radio e avviare la cautela.
+Gli effetti sonori si attivano con il primo comando di gioco e si possono
+disattivare con AUDIO.
+
+Quando la SWAT prende in carico una stanza segnalata, ordina alle guardie
+presenti di uscire e assegna pattuglia esterna, copertura posteriore o
+sorveglianza dei punti sensibili. L’ingresso e i dispositivi di irruzione
+attendono che tutte le guardie attive siano fuori. Le destinazioni usano
+la posizione comunicata alla radio, senza leggere il giocatore nascosto.
+
+In cautela una guardia può delegare un rumore a una collega più vicina e
+raggiungibile. La collega perlustra fisicamente il punto e i dintorni, poi
+trasmette il rapporto. La guardia richiedente aspetta: una collega abbattuta,
+incosciente o impossibilitata a rispondere non viene rilevata magicamente.
+Alla scadenza dell’attesa, la richiedente si insospettisce e va a verificare.
+Contatti visivi reali e ordini di sgombero SWAT hanno precedenza sulla delega.
+
+Senza contatto visivo o una segnalazione recente del giocatore, la SWAT può
+seguire il sangue visibile, anche se già segnalato dalle guardie. Muri, fumo
+e durata della traccia limitano ciò che può scoprire. Le impronte svaniscono
+in 12 secondi; le macchie delle ferite durano 45 secondi e la loro superficie
+è proporzionata al danno effettivamente subito. I danni creano una macchia
+immediata, mentre il sanguinamento continua a lasciare gocce fino alla cura.
+
+Il Soliton mostra solo geometria e presenze, senza oggetti o obiettivi.
+In condizioni normali non compare un’etichetta di stato. Allerta ed evasione
+oscurano completamente mappa, operatore, contatti e coordinate: prima
+compare DISTURBATO, poi il nome della fase e il conto alla rovescia. ALLERTA
+parte da 99 secondi: il contatto visivo la mantiene a 99, mentre senza visuale
+scende quattro volte più rapidamente. Seguono 99 secondi di EVASIONE e almeno
+180 secondi di CAUTELA, rinnovati da nuove prove. Finita la cautela torna NORMALE.
+CAUTELA e il suo tempo compaiono sopra il radar, che torna leggibile. La SWAT
+entra con coni rossi anche quando l’allarme nasce da un avvistamento.
+Le ultime tre comunicazioni radio restano visibili, con un massimo di tre righe
+ciascuna: rumori, avvistamenti, richieste, ordini, scoperte e rapporti negativi.
+Le telecamere di sicurezza
+ruotano su un arco totale massimo di 125° e hanno un punto cieco entro
+1,25 unità dalla base, rappresentato anche nei coni visivi.
+
 I checkpoint intermedi, l'ambiente virtuale e i dati delle partite in `.runtime/`
 rimangono locali. Il frontend non richiede una compilazione. Per verificare il progetto:
 
 ```powershell
 python -m pytest tests -q
-node --test tests/test_frontend.cjs tests/test_radar.cjs
+node --test tests/test_frontend.cjs tests/test_radar.cjs tests/test_scene3d.cjs tests/test_sound.cjs
 ```
 
 Node.js serve soltanto per i test del frontend. Le sezioni seguenti descrivono
@@ -265,19 +362,83 @@ campo visivo, distanza, muri e stato operativo della guardia.
 
 Ogni cattura, neutralizzazione o uscita vittoriosa salva un JSON in
 `.runtime/episodes/`, con osservazioni della policy, azioni tattiche, eventi dei
-diversivi ed esito. Il server esegue in background un piccolo aggiornamento dei
-pesi basato sull'esito: ricompensa positiva alla sicurezza per cattura, negativa
-per fuga, con baseline di valore ed entropia. Questo aggiornamento incrementale
-non equivale a un nuovo rollout PPO: usa anche gli intenti deterministici del
-runtime e non garantisce un miglioramento dopo ogni singola partita.
+diversivi, esito e percorso completo del player, registrato a ogni tick con il tempo.
+Il server esegue in background un piccolo aggiornamento dei pesi basato
+sull'esito e sul percorso: premia le decisioni nemiche che si avvicinano alla
+traiettoria effettiva e penalizza quelle che se ne allontanano, con baseline di
+valore ed entropia. Le decisioni comprendono anche le guardie ausiliarie, che
+usano lo stesso modello con osservazioni limitate ai propri sensi e alla radio.
+Questo aggiornamento incrementale
+non equivale a un nuovo rollout PPO e non garantisce un miglioramento dopo
+ogni singola partita. Vengono addestrate solo le decisioni realmente eseguite:
+gli intenti sostituiti da cure, ripari obbligatori, ordini di squadra o altre
+azioni del runtime vengono esclusi. Una partita priva di decisioni valide
+viene comunque salvata con stato `SKIPPED`, senza modificare i pesi.
 
 Il checkpoint originale viene preservato; ogni episodio produce un checkpoint
 separato e aggiorna `guard_latest.zip` o `swat_latest.zip`. Il modello aggiornato
 viene caricato alla prossima partita iniziata dopo il completamento del lavoro.
+Passando al livello successivo, l’aggiornamento sul percorso precedente viene
+applicato appena pronto, senza bloccare il gioco; il pannello indica analisi
+in corso o percorso appreso. La traiettoria conclusa serve solo all’addestramento
+retrospettivo e non rivela il player nascosto ai nemici durante il gioco.
 L'interfaccia mostra addestramento in corso, completato oppure fallito; i dettagli
 del fallimento restano nello schema e nello stato `learning` del server. Un reset
 manuale di una partita non conclusa non avvia l'addestramento. Le osservazioni
 registrate contengono soltanto le informazioni disponibili alla policy.
+
+## Addestramento tattico sulle meccaniche aggiornate
+
+`train_runtime_tactics.py` addestra due policy contestuali distinte, una per
+le guardie e una per la SWAT. Usano **32 osservazioni e 6 azioni**: proseguire
+con il comportamento ordinario, cercare una cura, coprire un alleato in cura,
+raggiungere un riparo, sorvegliare l'intel rimasto o controllare una posizione
+segnalata. Le osservazioni comprendono condizioni fisiche, munizioni,
+disponibilità medica, richieste di assistenza e informazioni già conosciute
+tramite sensi e radio. Non contengono la posizione attuale del player nascosto.
+
+Le nuove policy affiancano i modelli originali di movimento e percezione,
+che mantengono le proprie interfacce e i propri checkpoint. La policy
+contestuale SWAT è usata anche dagli operatori presenti nella campagna.
+Percezione, consumo delle risorse, reazioni obbligatorie ai colpi e sicurezza
+della squadra continuano a essere applicati dal runtime del gioco.
+
+Con le dipendenze installate nell'ambiente locale, da PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe train_runtime_tactics.py --steps 32768 --rounds 3 --eval-episodes 24
+```
+
+`--steps` indica i passi PPO per ciclo e per ruolo; `--rounds` limita i cicli.
+Il training può fermarsi prima del limite se supera i criteri di validazione.
+Gli scenari usano gli esecutori del gioco per movimento, cure, medici,
+consumo dei kit, ripari, rapporti radio e prove osservate dalle telecamere.
+La validazione e la valutazione finale usano semi separati dal training.
+
+Ogni esecuzione salva i checkpoint `guard_context.zip` e `swat_context.zip`,
+lo stato `progress.json` e i rapporti `report.json`/`report.md` in una nuova
+cartella di `.runtime/training/`. Il confronto di riferimento usa l'azione
+contestuale `CONTINUE`: misura l'effetto del nuovo livello decisionale,
+senza sostituire o riaddestrare i modelli originali di movimento.
+Le percentuali nei rapporti descrivono gli scenari tattici del curriculum;
+non rappresentano una probabilità di vittoria contro un giocatore umano.
+
+Solo quando entrambi i ruoli superano i criteri viene aggiornato
+`.runtime/training/active.json`, che il gioco legge al caricamento del settore.
+Il manifest precedente, se presente, viene conservato nella cartella della
+nuova esecuzione. `--no-activate` salva e valuta i candidati senza attivarli;
+`--out PERCORSO` sceglie una cartella di output esplicita.
+Per usare soltanto i comportamenti originali nella sessione corrente:
+
+```powershell
+$env:SHADOW_CONTEXT_MODELS = 'off'
+.\.venv\Scripts\python.exe game_server.py
+```
+
+Rimuovendo questa variabile si ripristina il caricamento del manifest.
+Checkpoint opzionali mancanti, corrotti o incompatibili lasciano utilizzabili
+i modelli di base. Gli aggiornamenti da partite in `.runtime/episodes/`
+restano separati dai modelli contestuali attivati dal training.
 
 ## Spotting e risposta tattica nel gioco interattivo
 
@@ -299,15 +460,21 @@ Ogni cono interpola il proprio indice di spotting: azzurro allo 0%, giallo al
 50%, rosso al 100%, anche per telecamere e SWAT. Il colore non dipende
 dall'allarme globale e il sospetto degli altri agenti non lo modifica.
 
-La SWAT di rinforzo corre più rapidamente verso i rapporti ricevuti e può
-seguire la rotta delle pattuglie ancora in ricerca. Se l'ultimo punto noto è
+La SWAT di rinforzo corre verso i rapporti ricevuti e coordina la ricerca tra
+i propri membri. Se l'ultimo punto noto è
 nelle stanze chiuse archivio o caveau, la squadra sceglie una porta comune,
 attende in posizioni distinte, usa una flashbang e un fumogeno, poi controlla
 gli angoli con percorsi distribuiti. Le granate hanno scorte limitate; il fumo
 blocca la vista senza bloccare il movimento e la flash rallenta temporaneamente
-il giocatore nel raggio dell'esplosione, rispettando i muri. Le guardie libere
-sorvegliano gli intel ancora presenti e l'esfiltrazione; quelle in contatto
-continuano a verificare o inseguire. Anche la modalità SWAT dedicata usa
+il giocatore nel raggio dell'esplosione, rispettando i muri. Le guardie che
+vedono il player si dispongono su linee di tiro libere, anche durante
+l'inseguimento della SWAT. Perso il contatto confermato, tornano a perlustrare
+i punti sensibili: intel ancora presenti, medikit disponibili se una ferita
+del player è nota, esfiltrazione quando tutti i furti sono stati confermati.
+I posti sono distanziati attorno agli oggetti e cambiano ogni otto secondi.
+Solo la SWAT prosegue l'inseguimento fuori visuale, usando rapporti e indizi:
+completa una ricerca locale, supporta per dodici secondi al massimo gli intel
+privi di guardie e si ritira. Anche la modalità SWAT dedicata usa
 movimento e rotazioni più rapidi. Il reset azzera chiamate, piani ed effetti.
 
 Accovacciarsi usa **C**, evitando le scorciatoie del browser con Ctrl. Il player
@@ -322,6 +489,15 @@ secondi senza corsa ed è graduale. Ogni ciclo di corsa di almeno mezzo secondo 
 recupero aggiunge l'8% di fatica, fino al 40%: la velocità cala e soltanto un riposo
 prolungato dopo aver riempito la stamina rimuove gradualmente la fatica. Dopo
 l'esaurimento bisogna recuperare almeno il 35% prima di correre nuovamente.
+Restare immobili aumenta progressivamente il recupero fino a tre volte il ritmo
+ordinario; camminare azzera il bonus. Dopo l’esaurimento il recupero mantiene
+il ritmo ordinario fino a barra piena, anche usando uno snack. Vale per tutti.
+
+Una ferita superficiale (singolo danno fino al 15%, salute almeno all’80%) può
+rimarginarsi dopo 30 secondi senza corsa o malus. La salute torna gradualmente
+allo 0,15% al secondo e il piccolo sanguinamento si arresta. Infortunio, paura,
+fumo, stordimento, esaurimento o fatica indipendente dalla ferita bloccano la
+guarigione spontanea. Le ferite gravi richiedono cure. Vale anche per guardie e SWAT.
 Quando viene scoperto, il player ha 2,5 secondi di corsa al 165% della velocità
 normale di sprint, consumando più stamina. Gli aggiornamenti dello stesso contatto
 non rinnovano lo scatto; un nuovo episodio dopo almeno 12 secondi senza contatto
@@ -363,6 +539,21 @@ della squadra; durante lo spostamento il tiratore resta rivolto verso l'ultimo
 punto realmente osservato. La stessa protezione vale nella modalità SWAT
 dedicata. Gli spari producono un richiamo sonoro per i nemici vicini.
 
+Anche i nemici ricaricano: una guardia impiega **2,8 secondi**, la SWAT
+**1,05 secondi** con ricarica rapida e caricatore a terra. La SWAT preferisce
+estrarre la pistola carica in **0,42 secondi**; arma principale e secondaria
+hanno munizioni separate e finite, quindi entrambe devono poi essere ricaricate.
+Finire le scorte impedisce ulteriori colpi e il cambio arma non crea munizioni.
+
+Nel conflitto ravvicinato la SWAT avanza lentamente dietro lo scudo. I compagni
+raggiungono fisicamente posizioni laterali e si sporgono a turno per sparare.
+Lo scudo si ferma durante la ricarica; gli altri ricaricano dietro di lui o
+dietro coperture. Una raffica automatica frontale sopprime il portatore dello
+scudo e gli impedisce temporaneamente di sparare; i colpi di pistola non
+producono questa soppressione. Se la squadra vede il player voltarsi e fuggire,
+un operatore può uscire dal riparo e lanciare una stordente sul punto osservato.
+I compagni attendono fuori dal raggio della stordente prima di avanzare.
+
 ## Ferite e scie di sangue
 
 I proiettili ricevuti aprono ferite: il player perde gradualmente salute e vigore,
@@ -373,12 +564,37 @@ La postazione medica (tieni **E** da vicino) richiede **4 secondi**, recupera gr
 salute massima durante l’applicazione**, poi un ulteriore **25% nei successivi
 2 minuti**, fino al limite della salute massima. Ferma il sanguinamento al
 completamento. **E breve** raccoglie le bende; **E tenuto** usa la postazione fissa: si trovano sulla mappa,
-e i kit medici non vengono lasciati dalle sentinelle neutralizzate. Movimento,
+e i medici lasciano cadere i kit portatili rimasti se storditi o uccisi. Movimento,
 azioni di combattimento o un nuovo colpo interrompono l’applicazione; l’oggetto
 iniziato viene consumato e il recupero differito parte solo completando il kit.
 
-Guardie e SWAT, perso il contatto visivo, seguono le nuove tracce realmente
-visibili. I muri e il cono visivo limitano ciò che possono scoprire: non ricevono
+Anche le guardie ferite possono curarsi. Ogni missione dispone di un medico,
+riconoscibile dalla croce verde e dalla dicitura MEDICO, con due kit consumabili.
+Una guardia al sicuro richiede assistenza via radio e aspetta che il medico
+raggiunga fisicamente la posizione comunicata. Il medico consuma un kit per
+applicare la cura; i colpi e il contatto visivo interrompono l'assistenza.
+Se non c'è un medico disponibile, la guardia raggiunge una postazione medica
+accessibile. La postazione è condivisa: quella usata da una guardia scompare,
+mentre quella usata dal player scompare a cura completata. Nessun altro può
+riutilizzarla e non viene più assegnata come punto da sorvegliare.
+
+Le telecamere possono riconoscere sia sentinelle incoscienti sia morte,
+oltre all'assenza dell'intel nel proprio campo visivo. Guardie e telecamere
+segnalano il furto alla radio e portano il settore in cautela; muri, fumo e
+orientamento limitano l'osservazione. Il rapporto richiede il tempo di
+trasmissione e viene interrotto se la sentinella viene neutralizzata.
+
+Una sentinella che sopravvive a uno sparo proveniente fuori dalla visuale,
+senza un malus attivo di stordimento o sorpresa, cerca riparo allontanandosi
+dalla provenienza del colpo. Trasmette **SHOOT FIRE, SHOOT FIRE** e richiede
+l'intervento SWAT. Gli operatori SWAT si riparano e lanciano una granata,
+flashbang o fumogeno disponibile verso l'origine dello sparo; se il riparo
+blocca il lancio, raggiungono un angolo libero. La risposta usa il punto
+registrato al momento del colpo.
+
+La SWAT, perso il contatto visivo, segue le nuove tracce realmente
+visibili; le guardie ordinarie segnalano gli indizi e presidiano i punti sensibili
+dopo aver identificato l'intruso. I muri e il cono visivo limitano ciò che possono scoprire: non ricevono
 la posizione nascosta del player. Le tracce esaminate sono note alla squadra e
 non avviano altre indagini; nuove gocce possono prolungare l'inseguimento. Alla
 fine della scia l'unità cerca attorno all'ultima traccia. Il sangue rimasto dopo
@@ -502,6 +718,9 @@ Per calmarla occorre mangiare uno snack e mantenere salute e vigore pieni
 per 3 secondi consecutivi. Gli snack si raccolgono sulla mappa e si mangiano
 selezionandoli nello zaino e premendo E. Il pannello mostra paura,
 infortunio e tempo di accovacciamento rimasto.
+Lo snack restituisce subito fino al 20% di vigore e non cura la salute.
+L’HUD mostra il guadagno effettivo, l’eventuale attesa per calmarsi e gli stati
+di recupero, così da distinguere effetti immediati, progressivi e bloccati.
 
 I nemici che hanno ferito il player, perdendolo di vista, si spostano verso
 una postazione medica per sorvegliarla. L'uso, anche interrotto, lascia tracce:
@@ -516,12 +735,16 @@ una granata: la lancia solo a distanza, con visuale libera e senza compagni
 vicini al bersaglio. Le granate recuperate si lanciano con E, hanno una
 miccia di 1,5 secondi e un raggio di 3 celle segnalato sulla mappa; i muri
 bloccano i danni e l'esplosione può colpire anche chi le ha lanciate.
+Un'esplosione ravvicinata scaraventa player, guardie e SWAT lontano dal centro:
+la spinta diminuisce con la distanza e si arresta contro muri e limiti della
+mappa. Il player cade a terra e le guardie interrompono mira e azioni in corso.
 
 ## Campagna in tre missioni
 
 Il pulsante per il quadro successivo conserva tutti gli altri oggetti dello
-zaino, inclusi coltello, cure, granate e oggetti di missione; la pistola e
-tutte le munizioni vengono smarrite. I caricatori vuoti e i bossoli usati
+zaino, inclusi coltello, cure, granate e oggetti di missione; la pistola
+standard viene smarrita. Le altre armi mantengono caricatori e munizioni,
+e rimane la scorta condivisa. I caricatori vuoti e i bossoli usati
 come diversivi rimangono nello zaino.
 
 1. **Atrio e reception:** uffici amministrativi e sala congressi; recupera la

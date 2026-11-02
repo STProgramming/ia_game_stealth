@@ -1,6 +1,7 @@
 import json
 import math
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -208,6 +209,7 @@ def test_game_session_finishes_once_and_reuses_learned_checkpoint(tmp_path, outc
         r.spawn_grace = 0
         r.env.player_pos = r.env._exit.copy()
         r.env.player_has_intel[0] = 1
+        session.learning.record(r.env._observation(), 0, position=r.env.guard_pos)
         with patch.object(r.env, "_terminal_events", return_value=(False, outcome == "CAPTURED")):
             state = session.tick()
         assert state["status"] == outcome
@@ -229,16 +231,152 @@ def test_completed_match_saves_schema_and_changes_weights(tmp_path, outcome):
     learning = EpisodeLearning(model, "guard", tmp_path)
     observation, _ = env.reset()
     for i in range(8):
-        learning.record(observation, i % 4)
+        learning.record_path([10.,0.],.1)
+        learning.record(observation, i % 4,position=[float(i),0.])
     learning.finish(outcome, 1, 71)
     result = learning.future.result(timeout=30)
     assert result["status"] == "TRAINED", result
     schema = json.loads(Path(result["schema"]).read_text(encoding="utf-8"))
     assert schema["outcome"] == outcome
     assert len(schema["samples"]) == 8
+    assert len(schema['player_path'])==8
+    assert schema['route_training']['decisions_with_feedback']>0
     updated = PPO.load(result["checkpoint"])
     assert any(not torch.equal(original[key], value)
                for key, value in updated.policy.state_dict().items())
     assert all(torch.equal(original[key], value) for key, value in model.policy.state_dict().items())
     learning.finish(outcome, 1, 71)
     assert len(list(tmp_path.glob("*.json"))) == 1
+
+
+def test_route_feedback_rewards_interception_and_penalizes_moving_away():
+    samples=[dict(actor='G0',time=i,position=[i,0]) for i in range(3)]
+    toward=dict(samples=samples,player_path=[dict(time=i,x=10,y=0) for i in range(5)])
+    away=dict(samples=samples,player_path=[dict(time=i,x=-10,y=0) for i in range(5)])
+    assert EpisodeLearning.route_rewards(toward)[0]>0
+    assert EpisodeLearning.route_rewards(away)[0]<0
+
+
+def test_auxiliary_policy_observations_do_not_reveal_hidden_player_and_restore_lead_state():
+    r=runtime()
+    guard=r.aux_guards[0]
+    guard.seeing_player=False
+    original_pos=r.env.guard_pos.copy()
+    observation=r._policy_observation_for_guard(guard)
+    r.env.player_pos=np.array([55.,30.],dtype=np.float32)
+    hidden_elsewhere=r._policy_observation_for_guard(guard)
+    assert np.array_equal(observation,hidden_elsewhere)
+    assert np.array_equal(r.env.guard_pos,original_pos)
+    r.learning_decisions=[]
+    r.policy_tick=1
+    r._step_aux_guards()
+    assert {actor for _,_,actor in r.learning_decisions}=={g.guard_id for g in r.aux_guards}
+
+
+def test_next_level_keeps_complete_route_and_applies_training_as_soon_as_ready(tmp_path):
+    from concurrent.futures import Future
+    from game_server import GameSession
+    model=PPO('MlpPolicy',ShadowProtocolEnv(),n_steps=8,batch_size=8,device='cpu')
+    path=tmp_path/'base.zip'; model.save(path)
+    future=Future()
+    with patch('game_server.ROOT',tmp_path), patch('shadow_ai.episode_learning._WORKER.submit',return_value=future) as train:
+        session=GameSession(path,None)
+        for i in range(5):
+            session.learning.record_path([float(i),3.],1/30)
+        session.learning.record(session.runtime.env._observation(), 0)
+        lesson=session.learning
+        session.runtime.status='ESCAPED'
+        session.handle(dict(type='next_level'))
+        assert session.runtime.level==2
+        payload=train.call_args.args[2]
+        assert [point['x'] for point in payload['player_path']]==list(range(5))
+        assert session.previous_lesson is lesson
+        assert session.pending_lessons
+        learned=SimpleNamespace(observation_space=model.observation_space, action_space=model.action_space)
+        future.set_result(dict(status='TRAINED',episode_checkpoint=str(path),level=1,path_points=5))
+        with patch('game_server.PPO.load',return_value=learned) as load:
+            session._apply_completed_lessons()
+        load.assert_called_once_with(str(path),device='cpu')
+        assert session.runtime.model is learned and session.learning.model is learned
+        assert not session.pending_lessons
+
+
+def test_learning_rejects_overridden_or_incompatible_decisions_without_credit(tmp_path):
+    model = PPO('MlpPolicy', ShadowProtocolEnv(), n_steps=8, batch_size=8, device='cpu')
+    learning = EpisodeLearning(model, 'guard', tmp_path)
+    observation, _ = ShadowProtocolEnv().reset(seed=31)
+    assert not learning.record(observation, 0, executed=False)
+    assert not learning.record(np.zeros(32), 0)
+    assert not learning.record(observation, model.action_space.n)
+    assert learning.record(observation, 0)
+    assert len(learning.samples) == 1 and learning.samples[0]['executed']
+    assert learning.skipped_decisions == dict(overridden=1, incompatible=2)
+
+
+def test_match_with_only_mandatory_behaviour_is_saved_without_updating_weights(tmp_path):
+    model = PPO('MlpPolicy', ShadowProtocolEnv(), n_steps=8, batch_size=8, device='cpu')
+    learning = EpisodeLearning(model, 'guard', tmp_path)
+    observation, _ = ShadowProtocolEnv().reset(seed=31)
+    learning.record(observation, 0, executed=False)
+    learning.finish('ESCAPED', 1, 31)
+    assert learning.future is None and learning.state()['status'] == 'SKIPPED'
+    payload = json.loads(Path(learning.state()['schema']).read_text(encoding='utf-8'))
+    assert payload['version'] == 3 and payload['training'] == 'SKIPPED'
+    assert payload['samples'] == [] and payload['skipped_decisions']['overridden'] == 1
+    assert not list(tmp_path.glob('*.zip'))
+
+
+def test_server_omits_overridden_samples_and_keeps_context_decisions_separate(tmp_path):
+    from game_server import GameSession
+    model = PPO('MlpPolicy', ShadowProtocolEnv(), n_steps=8, batch_size=8, device='cpu')
+    path = tmp_path / 'base.zip'
+    model.save(path)
+    with patch('game_server.ROOT', tmp_path):
+        session = GameSession(path, None)
+        observation = session.runtime.env._observation()
+        session.runtime.learning_decisions = [(observation, 0, 'G0'), (observation, 0, 'G1'),
+                                              (observation, 0, 'G2', False)]
+        session.runtime.context_decisions = [(np.zeros(32), 2, 'G0')]
+        session.runtime._legacy_policy_overrides = {'G1'}
+        with patch.object(session.runtime, 'tick'):
+            session.tick()
+        assert [sample['actor'] for sample in session.learning.samples] == ['G0']
+        assert session.learning.skipped_decisions['overridden'] == 2
+
+
+@pytest.mark.parametrize('checkpoint_kind', ['different_spaces', 'corrupt'])
+def test_incompatible_episode_checkpoint_keeps_validated_base_policy(tmp_path, checkpoint_kind):
+    from game_server import GameSession
+    model = PPO('MlpPolicy', ShadowProtocolEnv(), n_steps=8, batch_size=8, device='cpu')
+    path = tmp_path / 'base.zip'
+    model.save(path)
+    episodes = tmp_path / '.runtime' / 'episodes'
+    episodes.mkdir(parents=True)
+    checkpoint = episodes / 'guard_latest.zip'
+    if checkpoint_kind == 'different_spaces':
+        other = PPO('MlpPolicy', 'CartPole-v1', n_steps=8, batch_size=8, device='cpu')
+        other.save(checkpoint)
+    else:
+        checkpoint.write_bytes(b'Incomplete checkpoint')
+    with patch('game_server.ROOT', tmp_path):
+        session = GameSession(path, None)
+    assert session.runtime.model.observation_space == model.observation_space
+    assert session.runtime.model.action_space == model.action_space
+    expected = 'INCOMPATIBLE' if checkpoint_kind == 'different_spaces' else 'UNREADABLE'
+    assert session.learning_checkpoint_status == expected
+    assert all(torch.equal(value, model.policy.state_dict()[key])
+               for key, value in session.runtime.model.policy.state_dict().items())
+
+
+def test_skipped_pending_lesson_is_removed_without_polling_forever(tmp_path):
+    from game_server import GameSession
+    model = PPO('MlpPolicy', ShadowProtocolEnv(), n_steps=8, batch_size=8, device='cpu')
+    path = tmp_path / 'base.zip'
+    model.save(path)
+    with patch('game_server.ROOT', tmp_path):
+        session = GameSession(path, None)
+        skipped = session.learning
+        skipped.finish('ESCAPED', 1, 1)
+        session.pending_lessons = [(skipped, 'guard')]
+        session._apply_completed_lessons()
+        assert not session.pending_lessons

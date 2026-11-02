@@ -3,42 +3,56 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Shadow Protocol</title>
-  <meta name="theme-color" content="#06110f" />
-  <link rel="stylesheet" href="/static/styles.css?v=20261005-11" />
+  <title>Shadow Protocol · 3D</title>
+  <meta name="theme-color" content="#071119" />
+  <link rel="stylesheet" href="/static/styles.css?v=20261029-equipment" />
 </head>
-<body>
+<body data-renderer="loading">
   <header class="console-header">
-    <div class="brand"><span class="brand-mark" aria-hidden="true">◈</span><div><span class="eyebrow">SHADOW PROTOCOL</span><h1>SOLITON RADAR</h1></div></div>
-    <div class="operation"><span class="eyebrow">OPERAZIONE / INFILTRAZIONE</span><span id="levelLabel">SETTORE 01</span></div>
+    <div class="brand"><span class="brand-mark" aria-hidden="true">◈</span><div><span class="eyebrow">SHADOW PROTOCOL</span><h1>INFILTRAZIONE <b>3D</b></h1></div></div>
+    <div class="operation"><span class="eyebrow">COMPLESSO SOLITON / OPERAZIONE NOTTURNA</span><span id="levelLabel">SETTORE 01</span><span id="learningStatus" class="learning-status" role="status" hidden></span></div>
     <div class="signal"><span class="signal-dot" aria-hidden="true"></span><span id="connectionLabel">CONNESSIONE</span><span class="signal-bars" aria-hidden="true">▂▄▆█</span></div>
   </header>
-  <div class="telemetry-strip" aria-label="Salute, vigore e situazione">
-    <section class="player-hud" aria-label="Condizioni del player">
-      <div class="hud-title"><span>◈ OPERATORE</span><span id="playerCondition">OPERATIVO</span></div>
-      <div class="hud-vital health"><span>SALUTE</span><div class="hud-track"><i id="playerHealthFill"></i></div><strong id="playerHealthValue">100%</strong></div>
-      <div class="hud-vital stamina"><span>VIGORE</span><div class="hud-track"><i id="playerStaminaFill"></i></div><strong id="playerStaminaValue">100%</strong></div>
-    </section>
-    <div id="alertHud" role="status" aria-live="polite">
-      <strong id="alertTitle"></strong>
-      <span id="alertDetail"></span>
-      <div class="phase-meter" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
-    </div>
-  </div>
   <section class="mission-brief" aria-label="Obiettivo della missione"><strong id="missionTitle">MISSIONE 1 · ATRIO E RECEPTION</strong><span id="missionObjective">Trova la scheda di sicurezza nell’ufficio.</span><span id="missionRequirements"></span></section>
-  <main class="canvas-wrap" aria-label="Radar tattico">
-    <div class="radar-caption"><span>TACTICAL FIELD / LIVE</span><span id="radarCoords">X 02.0 / Y 27.0</span></div>
-    <canvas id="game" tabindex="0" aria-label="Shadow Protocol. Muoviti con WASD o le frecce."></canvas>
+  <main class="canvas-wrap" aria-label="Scena 3D della missione">
+    <canvas id="game" tabindex="0" aria-label="Shadow Protocol 3D. WASD o frecce per muoverti, rotella per lo zoom, T per la panoramica."></canvas>
+    <div id="flashOverlay" aria-hidden="true"></div>
+    <div class="radar-caption"><span><i class="live-dot"></i> LIVE / <b>SCENA 3D</b></span><span id="stanceLabel">OPERATIVO</span></div>
+    <aside id="radarPanel" class="radar-panel" aria-label="Minimappa tattica">
+      <div class="map-heading"><span>SOLITON / RADAR</span><span class="north">N ↑</span></div>
+      <canvas id="radar" aria-label="Radar con mappa e presenze. Indisponibile durante allerta ed evasione."></canvas>
+      <div id="radarCoords">X 02.0 / Y 27.0</div>
+      <div id="alertHud" role="status" aria-live="polite" hidden>
+        <strong id="alertTitle"></strong>
+        <span id="alertDuration" aria-live="off" title="Tempo trascorso nella fase"></span>
+        <span id="alertDetail"></span>
+      </div>
+    </aside>
+    <div class="telemetry-strip" aria-label="Salute, vigore e situazione">
+      <section class="player-hud" aria-label="Condizioni del player">
+        <div class="hud-title"><span>◈ OPERATORE</span><span id="playerCondition">OPERATIVO</span></div>
+        <div class="hud-vital health"><span>SALUTE</span><div class="hud-track"><i id="playerHealthFill"></i></div><strong id="playerHealthValue">100%</strong></div>
+        <div class="hud-vital stamina"><span>VIGORE</span><div class="hud-track"><i id="playerStaminaFill"></i></div><strong id="playerStaminaValue">100%</strong></div>
+        <div id="weaponStatus" class="weapon-readout" hidden></div>
+        <div id="vitalEffects" class="vital-effects" role="status" aria-live="polite" hidden></div>
+      </section>
+    </div>
+    <div id="radioMessage" class="radio-message" role="log" aria-label="Ultime tre comunicazioni radio" aria-live="polite" hidden></div>
+    <div id="interactionHint" class="interaction-hint" hidden></div>
     <div id="banner" class="banner hidden" role="status"></div>
+    <div class="camera-controls"><span>ROTELLA · ZOOM</span><button id="cameraBtn" type="button" aria-pressed="false" title="Alterna inseguimento e panoramica (T)">T · PANORAMICA</button></div>
     <button id="fullscreenBtn" type="button" aria-label="Schermo intero" title="Schermo intero (F11)">&#x26F6;</button>
   </main>
   <footer class="console-footer">
     <div class="mission"><span class="eyebrow">DATI MISSIONE</span><strong id="intelLabel">INTEL 00 / 01</strong><div class="intel-track"><span id="intelProgress"></span></div></div>
-    <section class="backpack" aria-label="Zaino e oggetto selezionato"><div class="pack-heading"><span class="eyebrow">ZAINO · SELEZIONA CON IL MOUSE</span><span id="selectedItemLabel">Coltello</span></div><div id="backpackItems" class="pack-items"></div><span id="equipmentLabel" class="equipment">COLTELLO</span></section>
+    <section class="backpack" aria-label="Zaino e oggetto selezionato"><div class="pack-heading"><span class="eyebrow">ZAINO · <span id="backpackCapacity">0/10 POSTI · 0.0 kg</span></span><span id="selectedItemLabel">Coltello</span><button id="dropItemBtn" type="button" title="Lascia a terra oggetto o pila selezionata (G)">LASCIA · G</button></div><div id="backpackItems" class="pack-items"></div><span id="equipmentLabel" class="equipment">COLTELLO</span></section>
     <div class="legend" aria-label="Legenda coni visivi"><span><i class="normal"></i>Normale</span><span><i class="suspicious"></i>Sospetto</span><span><i class="alert"></i>Allerta</span></div>
     <button id="visionBtn" type="button" aria-pressed="true" title="Mostra o nascondi i coni visivi (V)">CONI <span>ON</span></button>
+    <button id="soundBtn" type="button" aria-pressed="true" title="Attiva o disattiva gli effetti sonori">AUDIO ON</button>
   </footer>
-  <div class="controls"><span><kbd>WASD</kbd> Movimento</span><span><kbd>SHIFT</kbd> Corsa</span><span><kbd>C</kbd> Accovacciati / rialzati</span><span><kbd>E</kbd> Raccogli / usa selezione</span><span><kbd>TIENI E</kbd> Postazione medica</span><span><kbd>F</kbd> Coltello</span><span><kbd>TIENI F</kbd> Soffoca</span><span><kbd>SPAZIO</kbd> Tuffo / rialzati</span><span><kbd>Q</kbd> Lancia diversivo</span><span><kbd>R</kbd> Riavvia</span></div>
-  <script src="/static/app.js?v=20261005-11"></script>
+  <div class="controls"><span><kbd>WASD</kbd> Movimento</span><span><kbd>SHIFT</kbd> Corsa</span><span><kbd>C</kbd> Accovacciati</span><span><kbd>E</kbd> Raccogli / usa</span><span><kbd>TIENI E</kbd> Cura</span><span><kbd>F / TIENI F</kbd> Coltello / stordisci</span><span><kbd>SPAZIO</kbd> Tuffo</span><span><kbd>Q</kbd> Diversivo</span><span><kbd>G</kbd> Lascia oggetto / pila</span><span><kbd>H / DESTRO</kbd> Fuoco</span><span><kbd>R / RR</kbd> Ricarica / rapida</span><span><kbd>INVIO</kbd> Riprova / prosegui</span></div>
+  <script type="module" src="/static/sound.js?v=20261029-equipment"></script>
+  <script type="module" src="/static/scene3d.js?v=20261029-equipment"></script>
+  <script src="/static/app.js?v=20261029-equipment"></script>
 </body>
 </html>

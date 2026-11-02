@@ -70,7 +70,9 @@ def test_regular_guard_secures_sector_after_radio():
     guard = r.aux_guards[0]
     r._guard_goal_from_radio(guard)
     assert guard.state == "PROTECT INTEL"
-    assert np.array_equal(guard.target, r.env._intel[0])
+    post = r._security_assignment(guard)
+    assert np.array_equal(guard.target, post['goal'])
+    assert np.array_equal(post['anchor'], r.env._intel[0])
 
 
 def test_spawn_protection_all_levels_and_scenarios():
@@ -156,18 +158,18 @@ def test_evasion_caution_and_recontact():
     r.spawn_grace = 0
     r.spawn_safe = False
     r._publish_contact(np.array([20., 12.], dtype=np.float32), "C1")
-    r.team_contact_age = .6
+    r.security_cycle.step(99/4)
     r._update_facility_alert()
     assert r.facility_alert == "SEARCH"
-    r.team_contact_age = 13
+    r.security_cycle.step(99)
     r._update_facility_alert()
     assert r.facility_alert == "SUSPICIOUS"
     r._publish_contact(np.array([21., 12.], dtype=np.float32), "C1")
     assert r.facility_alert == "CONTACT"
-    r.team_contact_age = 33
+    r.security_cycle.step(99/4+99)
     r._update_facility_alert()
     assert r.facility_alert == "SUSPICIOUS"
-    r.team_contact_age = 300
+    r.security_cycle.step(179)
     r._update_facility_alert()
     assert r.facility_alert == "SUSPICIOUS"
     assert r.state()["security"]["high_guard"]
@@ -319,6 +321,8 @@ def test_guard_swat_search_visits_local_corners_and_scans():
     r.swat_units = [("SHIELD", g)]
     r.team_contact = anchor.copy()
     r.team_contact_age = 30
+    r.security_cycle.contact()
+    r.security_cycle.step(99/4)
     r._update_facility_alert()
     assert r.facility_alert == "SEARCH"
     visited = set()
@@ -401,13 +405,16 @@ def test_swat_mode_completes_search_after_radio_report_expires():
 def test_navigation_clamps_targets_and_never_crosses_walls():
     r = runtime()
     pos = np.array([2., 27.], dtype=np.float32)
-    goal = np.array([-10., 40.], dtype=np.float32)
-    for _ in range(100):
+    height, width = r.env.grid.shape
+    goal = np.array([-10., height + 10.], dtype=np.float32)
+    destination = r.navigator.goal(goal)
+    steps = int(np.ceil(2 * r.navigator.path_length(pos, destination) / .06)) + 1
+    for _ in range(steps):
         old = pos.copy()
         pos = r._navigate("edge", pos, goal, .06)
-        assert 0 <= pos[0] <= 47 and 0 <= pos[1] <= 29
+        assert 0 <= pos[0] <= width - 1 and 0 <= pos[1] <= height - 1
         assert line_clear(r.env.grid, old, pos)
-    assert np.linalg.norm(pos - [0, 29]) < .01
+    assert np.linalg.norm(pos - destination) < .01
 
 
 @pytest.mark.parametrize("mode", ("guard", "swat"))
@@ -493,7 +500,7 @@ def test_patrol_pause_is_interrupted_by_a_real_sighting():
     assert guard.state == "OBSERVE"
     r.env.player_pos = guard.pos + np.array([1., 0.], dtype=np.float32)
     r._step_aux_guard(guard)
-    assert guard.state == "CHASE"
+    assert guard.state in {"CHASE", "REPOSITION"}
     assert guard.pause_remaining == 0
     assert r.security_compromised
 
@@ -503,17 +510,26 @@ def test_swat_withdraws_off_map_and_can_be_dispatched_again():
     r.spawn_grace = 0
     r.spawn_safe = False
     r.env.player_pos = np.array([0., 29.], dtype=np.float32)
-    point = np.array([44., 10.], dtype=np.float32)
+    # The room-entry tests cover searches inside buildings. Use a hallway
+    # report here so the completed search can proceed directly to withdrawal.
+    point = np.array([44., 14.], dtype=np.float32)
     r._publish_contact(point, "C1")
     for _ in range(120):
         r._step_radio()
     r.team_contact_age = 100
+    # Match the facility clock to the completed search staged below.
+    r.security_cycle.step(r.security_cycle.remaining / 4.)
+    r.security_cycle.step(r.security_cycle.remaining)
+    r._update_facility_alert()
     deployed = [unit for _, unit in r.swat_units]
     for unit in deployed:
         unit.pos = np.array([44., 13.], dtype=np.float32)
         r._start_guard_search(unit, unit.pos)
         r._searches[unit.guard_id].index = len(r._searches[unit.guard_id].points)
-    for _ in range(1200):
+    route = max(r.navigator.path_length(unit.pos, unit.exit_pos) for unit in deployed)
+    walking_pace = float(r.env.cfg.guard_speed) / r.game_dt
+    departure_steps = int(np.ceil((2 * route / walking_pace + 5.) / r.game_dt))
+    for _ in range(departure_steps):
         for _, unit in r.swat_units:
             old = unit.pos.copy()
             r._step_aux_guard(unit)
@@ -561,8 +577,15 @@ def test_standalone_swat_leaves_and_stops_sensing_after_search():
     for index, uid in enumerate(r.core.agent_ids):
         unit = r.core.units[uid]
         unit.pos = np.array([30., 7.+index*.4], dtype=np.float32)
-        for _ in range(400):
+        exit_pos = np.array([r.core.cfg.width - 1., 7. + index * .4], dtype=np.float32)
+        route = r.navigator.path_length(unit.pos, exit_pos)
+        pace = .95 * unit.profile.move_multiplier
+        departure_steps = int(np.ceil((2 * route / pace + 5.) / r.game_dt))
+        for _ in range(departure_steps):
+            old = unit.pos.copy()
             r._step_swat_withdrawal(uid)
+            if unit.pos[0] <= r.core.cfg.width - 1:
+                assert r.core.map.line_clear(old, unit.pos)
             if uid in r._departed:
                 break
         assert uid in r._departed

@@ -17,6 +17,18 @@ _WORKER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="match-learning")
 _SAVE_LOCK = threading.Lock()
 
 
+def compatible_policy_spaces(candidate, reference):
+    """Episode updates must retain the legacy policy's input/action contract."""
+    for name in ('observation_space', 'action_space'):
+        expected = getattr(reference, name, None)
+        actual = getattr(candidate, name, None)
+        if expected is None:
+            continue
+        if actual is None or actual != expected:
+            return False
+    return True
+
+
 class EpisodeLearning:
     def __init__(self, model, mode: str, directory: Path):
         self.model = model
@@ -27,10 +39,63 @@ class EpisodeLearning:
         self.result = {"status": "RECORDING"}
         self.future = None
         self.finished = False
+        self.player_path = []
+        self.elapsed = 0.
+        self.skipped_decisions = {'overridden': 0, 'incompatible': 0}
 
-    def record(self, observation, action: int, actor: str = "G0"):
-        self.samples.append({"observation": np.asarray(observation).tolist(),
-                             "action": int(action), "actor": actor})
+    def record(self, observation, action: int, actor: str = "G0", position=None, executed=True):
+        if self.finished:
+            return False
+        if not executed:
+            self.skipped_decisions['overridden'] += 1
+            return False
+        observation = np.asarray(observation)
+        space = getattr(self.model, 'observation_space', None)
+        action_space = getattr(self.model, 'action_space', None)
+        if ((space is not None and observation.shape != space.shape)
+                or (action_space is not None and not action_space.contains(int(action)))):
+            self.skipped_decisions['incompatible'] += 1
+            return False
+        self.samples.append({"observation": observation.tolist(),
+                             "action": int(action), "actor": actor, "time": self.elapsed,
+                             "position": None if position is None else np.asarray(position).tolist(),
+                             'executed': True})
+        return True
+
+    def record_path(self, position, dt):
+        if self.finished:
+            return
+        self.elapsed += dt
+        self.player_path.append(dict(time=round(self.elapsed, 4), x=float(position[0]), y=float(position[1])))
+
+    @staticmethod
+    def route_rewards(payload):
+        """Retrospective interception feedback; no route is sent to live sensors.
+
+        Compare each agent's next decision position against the player's actual
+        route over the following two seconds. Approaching that route is rewarded;
+        moving away is penalized. Every recorded path point can supply a target.
+        """
+        samples, route = payload['samples'], payload.get('player_path', [])
+        rewards = np.zeros(len(samples), dtype=np.float32)
+        if not route:
+            return rewards
+        times = np.array([point['time'] for point in route])
+        positions = np.array([[point['x'], point['y']] for point in route])
+        following = {}
+        for index in range(len(samples) - 1, -1, -1):
+            sample = samples[index]
+            actor = sample['actor']
+            later = following.get(actor)
+            following[actor] = sample
+            if sample.get('position') is None or later is None or later.get('position') is None:
+                continue
+            target_index = min(len(route) - 1, int(np.searchsorted(times, sample.get('time', 0.) + 2.)))
+            target = positions[target_index]
+            before = np.linalg.norm(np.asarray(sample['position']) - target)
+            after = np.linalg.norm(np.asarray(later['position']) - target)
+            rewards[index] = np.clip((before - after) / max(1., before), -1., 1.)
+        return rewards
 
     def finish(self, outcome: str, level: int, seed: int):
         if self.finished:
@@ -39,17 +104,28 @@ class EpisodeLearning:
         episode_id = uuid4().hex
         self.directory.mkdir(parents=True, exist_ok=True)
         schema = self.directory / f"{self.mode}_{episode_id}.json"
-        payload = {"version": 1, "mode": self.mode, "outcome": outcome,
+        payload = {"version": 3, "mode": self.mode, "outcome": outcome,
                    "level": level, "seed": seed, "samples": self.samples,
-                   "events": self.events, "training": "PENDING"}
+                   "events": self.events, "player_path": self.player_path, "duration": self.elapsed,
+                   'skipped_decisions': dict(self.skipped_decisions),
+                   "training": "PENDING"}
+        if not self.samples:
+            payload['training'] = 'SKIPPED'
+            payload['reason'] = 'No executed legacy policy decisions in this match'
+            schema.write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')
+            self.result = dict(status='SKIPPED', schema=str(schema), level=level,
+                               path_points=len(self.player_path), reason=payload['reason'])
+            return
         schema.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        self.result = {"status": "TRAINING", "schema": str(schema)}
+        self.result = {"status": "TRAINING", "schema": str(schema), "level": level, "path_points": len(self.player_path)}
         # The worker gets independent weights: live inference is never mutated.
         self.future = _WORKER.submit(self._train, deepcopy(self.model), payload, schema)
 
     def _train(self, model, payload, schema):
         try:
-            samples = payload["samples"]
+            # Version 1/2 schemas lack this flag. New schemas explicitly record
+            # only actions whose intent survived the runtime's mandatory rules.
+            samples = [sample for sample in payload['samples'] if sample.get('executed', True)]
             if not samples:
                 raise ValueError("No tactical decisions recorded in this match")
             # Keep every match in the schema; bound each update to 2048 decisions.
@@ -61,7 +137,9 @@ class EpisodeLearning:
             outcome_reward = 1.0 if payload["outcome"] in {"CAPTURED", "NEUTRALIZED"} else -1.0
             # Bounded outcome-weighted policy gradient with a fitted value baseline.
             # This is incremental learning from a human match, not a PPO rollout.
-            targets = torch.full((len(batch),), outcome_reward, device=model.device)
+            route_rewards = self.route_rewards(dict(payload, samples=samples))
+            targets = torch.as_tensor(np.clip(.75 * outcome_reward + .5 * route_rewards[indices], -1., 1.),
+                                      dtype=torch.float32, device=model.device)
             model.policy.set_training_mode(True)
             optimizer = model.policy.optimizer
             for group in optimizer.param_groups:
@@ -89,9 +167,12 @@ class EpisodeLearning:
                 os.replace(temporary, latest)
             payload["training"] = "TRAINED"
             payload["checkpoint"] = str(checkpoint)
+            payload['route_training'] = dict(points=len(payload.get('player_path', [])),
+                decisions_with_feedback=int(np.count_nonzero(route_rewards)))
             schema.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             return {"status": "TRAINED", "schema": str(schema), "checkpoint": str(latest),
-                    "samples": len(samples)}
+                    "episode_checkpoint": str(checkpoint), "samples": len(samples),
+                    "path_points": len(payload.get('player_path', [])), "level": payload['level']}
         except Exception as exc:
             payload["training"] = "FAILED"
             payload["error"] = str(exc)

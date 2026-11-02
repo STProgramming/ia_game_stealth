@@ -185,7 +185,12 @@ def test_next_level_loses_pistol_and_ammo_and_keeps_every_other_item(game, level
     assert game.level == level + 1 and game.status == 'RUNNING'
     assert current['weapon'] is None and current['ammo'] == 0
     assert current['weapons'] == ['RIFLE'] and current['selected'] == 'KNIFE'
-    for key in original.keys() - {'weapon', 'ammo', 'weapons', 'selected'}:
+    assert current['firearm'] is None
+    assert current['inventory_slots'] == original['inventory_slots'] - 1
+    assert current['backpack_weight'] < original['backpack_weight']
+    for key in original.keys() - {'weapon', 'ammo', 'weapons', 'selected', 'firearm', 'ammo_stock', 'weapon_ammo',
+                                  'weapon_weight', 'weapon_speed_multiplier', 'draw_remaining', 'draw_duration',
+                                  'inventory_slots', 'backpack_weight', 'backpack_speed_multiplier'}:
         assert current[key] == original[key], key
 
 
@@ -267,7 +272,7 @@ def test_fall_can_drop_selected_item_and_it_can_be_recovered_once(request, mode,
     collect()
     restored = runtime.equipment.snapshot()
     assert not any(p['source'] == 'PLAYER' for p in runtime.pickups)
-    for key in before.keys() - {'weapon', 'selected'}:
+    for key in before.keys() - {'weapon', 'selected', 'weapon_weight', 'weapon_speed_multiplier', 'draw_remaining', 'draw_duration', 'backpack_speed_multiplier'}:
         assert restored[key] == before[key], key
     collect()
     assert runtime.equipment.snapshot() == restored

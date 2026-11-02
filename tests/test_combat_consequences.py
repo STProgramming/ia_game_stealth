@@ -237,6 +237,7 @@ def test_runtime_medkit_watch_travels_to_the_station_without_live_player_knowled
     grid[:] = 0
     world.player_pos = np.array([25.,18.],dtype=np.float32)
     station = dict(id='medical-test',kind='MEDKIT',fixed=True,pos=np.array([8.,4.],dtype=np.float32))
+    runtime.pickups = [station]
     runtime.medical_watch = MedicalSurveillance([station])
     if mode == 'game':
         runtime.lead_alive = False
@@ -245,7 +246,10 @@ def test_runtime_medkit_watch_travels_to_the_station_without_live_player_knowled
         runtime.medical_watch.hit(enemy.guard_id)
         runtime._step_guard(enemy)
         assert enemy.state == 'WATCH MEDKIT'
-        assert np.array_equal(enemy.target,station['pos'])
+        post = runtime._security_assignment(enemy)
+        assert post['key'] == 'MEDKIT:medical-test'
+        assert np.array_equal(enemy.target, post['goal'])
+        assert np.linalg.norm(enemy.target - station['pos']) >= .9
     else:
         enemy = next(iter(world.units.values()))
         enemy.pos,enemy.angle,enemy.local_visual = np.array([4.,4.],dtype=np.float32),0.,False

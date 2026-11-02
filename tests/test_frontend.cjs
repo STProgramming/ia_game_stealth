@@ -4,9 +4,12 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function frontend() {
+function frontend({withRadar = false} = {}) {
   const ids = ["game", "banner", "alertHud", "alertTitle", "alertDetail", "fullscreenBtn", "visionBtn", "levelLabel", "intelLabel", "intelProgress", "equipmentLabel", "radarCoords", "backpackItems", "selectedItemLabel", "playerHealthFill", "playerHealthValue", "playerStaminaFill", "playerStaminaValue", "playerCondition", "missionTitle", "missionObjective", "missionRequirements"];
+  ids.push("weaponStatus", "radioMessage", "radarPanel", "alertDuration", "vitalEffects", "learningStatus");
+  ids.push("backpackCapacity", "dropItemBtn");
   const handlers = {};
+  if (withRadar) ids.push("radar");
   const nodes = Object.fromEntries(ids.map(id => [id, {
     hidden: false, textContent: "", dataset: {}, style: {},
     setAttribute() {}, querySelector() {return {textContent: ""};},
@@ -19,7 +22,11 @@ function frontend() {
     if (prop === "createLinearGradient" || prop === "createRadialGradient") return () => ({addColorStop() {}});
     return () => {};
   }});
-  nodes.game.getContext = () => ctx;
+  nodes.game.getContext = () => {
+    if (withRadar) throw new Error("The 3D viewport must never acquire a 2D context");
+    return ctx;
+  };
+  if (withRadar) nodes.radar.getContext = () => ctx;
   const sandbox = {
     document: {getElementById: id => nodes[id], body: {dataset: {}}, documentElement: {}},
     window: {addEventListener(name, handler) { handlers[name] = handler; }, devicePixelRatio: 1},
@@ -41,6 +48,23 @@ function update(sandbox, data) {
 
 const base = {mode: "guard", status: "RUNNING", gameplay: {spawn_grace: 0}};
 
+test("enemy equipment labels require observation and distinguish reload draw and shield suppression", () => {
+  const {sandbox} = frontend();
+  const text = agent => {
+    sandbox.actor = agent;
+    return vm.runInContext("enemyActionLabel(actor)", sandbox);
+  };
+  const actor = {observed: true, alive: true, weapon: "SMG"};
+  assert.equal(text({...actor, firearm: {reload_mode: "TACTICAL"}}), "RICARICA");
+  assert.equal(text({...actor, firearm: {reload_mode: "FAST"}}), "RICARICA RAPIDA");
+  assert.equal(text({...actor, draw_remaining: .2}), "CAMBIO ARMA");
+  assert.equal(text({...actor, weapon: "PISTOL", secondary_weapon: "PISTOL"}), "PISTOLA SECONDARIA");
+  assert.equal(text({...actor, shield: true, suppression_timer: .8}), "SCUDO SOTTO FUOCO");
+  assert.equal(text({...actor, observed: false, draw_remaining: .2}), "");
+  assert.equal(text({...actor, alive: false, suppression_timer: .8, shield: true}), "");
+  assert.equal(text({...actor, unconscious: true, firearm: {reload_mode: "FAST"}}), "");
+});
+
 test("alert sequence is stable and never renders transient center messages", () => {
   const {sandbox, nodes} = frontend();
   for (const [phase, alert, title, detail] of [
@@ -52,7 +76,7 @@ test("alert sequence is stable and never renders transient center messages", () 
     ["ACTIVE", "SUSPICIOUS", "CAUTELA", "Guardia alta · Sorveglianza rafforzata"],
   ]) {
     update(sandbox, {...base, message: "HOLD G", security: {swat_phase: phase, alert, contact: {x: 10, y: 10}}});
-    assert.equal(nodes.alertTitle.textContent, title);
+    assert.equal(vm.runInContext("alertPresentation(state).title",sandbox), title);
     assert.equal(nodes.alertDetail.textContent, detail);
     assert.equal(nodes.banner.textContent, "");
   }
@@ -77,6 +101,132 @@ test("spawn alcove protection hides alarms after the countdown expires", () => {
 test("frame drawing runs with the minimal fullscreen DOM", () => {
   const {sandbox} = frontend();
   update(sandbox, {...base, map: {width: 48, height: 30, grid: [[0, 1], [0, 0]], exit: {x: 1, y: 1}}, player: {x: 1, y: 1}, guards: [{x: 0, y: 0, alive: true, action: "PATROL"}], swat: []});
+});
+
+test("3D rendering and minimap use separate canvases without stealing the WebGL context", () => {
+  const {sandbox, nodes, handlers} = frontend({withRadar: true});
+  let frames = 0, toggles = 0;
+  sandbox.window.shadowScene = {render(snapshot, options) {
+    frames++;
+    assert.equal(snapshot.player.x, 1);
+    assert.equal(options.now, 100);
+  }, toggleOverview() { toggles++; }};
+  update(sandbox, {...base, player: {x: 1, y: 1},
+    map: {width: 5, height: 5, grid: Array.from({length: 5}, () => Array(5).fill(0))}});
+  vm.runInContext("resize(); renderLoop(100);", sandbox);
+  assert.equal(frames, 1);
+  assert.equal(nodes.radar.width, 1280);
+  assert.equal(nodes.game.width, undefined);
+  handlers.keydown({key: "t", code: "KeyT", preventDefault() {}, repeat: false});
+  assert.equal(toggles, 1);
+});
+
+test("unavailable WebGL reports the radar fallback in the status banner", () => {
+  const {sandbox, nodes} = frontend({withRadar: true});
+  sandbox.window.shadowSceneError = "3D non disponibile: serve WebGL 2. Radar tattico attivo.";
+  update(sandbox, {...base});
+  assert.match(nodes.banner.textContent, /WebGL 2.*Radar/);
+});
+
+test("R reloads, a quick second R requests a fast reload, and repeat does not", () => {
+  const {sandbox, handlers} = frontend();
+  let now = 100;
+  sandbox.performance.now = () => now;
+  const press = repeat => handlers.keydown({key:"r",code:"KeyR",repeat,preventDefault(){}});
+  press(false);
+  assert.equal(vm.runInContext("inputPacket().reload",sandbox),true);
+  assert.equal(vm.runInContext("inputPacket().fast_reload",sandbox),false);
+  vm.runInContext("reloadPulse=false; fastReloadPulse=false",sandbox);
+  handlers.keyup({key:"r",code:"KeyR"}); now += 200;
+  press(false);
+  assert.equal(vm.runInContext("inputPacket().fast_reload",sandbox),true);
+  vm.runInContext("reloadPulse=false; fastReloadPulse=false",sandbox);
+  press(true);
+  assert.equal(vm.runInContext("inputPacket().reload",sandbox),false);
+  now += 500; press(false);
+  assert.equal(vm.runInContext("inputPacket().fast_reload",sandbox),false);
+});
+
+test("R never resets a mission; Backspace is the explicit restart control", () => {
+  const {sandbox, handlers} = frontend();
+  const messages = []; sandbox.sentPacket = value => messages.push(value);
+  vm.runInContext("send=sentPacket",sandbox);
+  handlers.keydown({key:"r",code:"KeyR",repeat:false,preventDefault(){}});
+  assert.ok(messages.every(message => message.type !== "reset"));
+  handlers.keydown({key:"Backspace",code:"Backspace",repeat:false,preventDefault(){}});
+  assert.equal(messages.filter(message => message.type === "reset").length,1);
+});
+
+test("G and the backpack button request a drop and the pack shows slots weight and mobility", () => {
+  const {sandbox,nodes,handlers}=frontend();
+  update(sandbox,{...base,player:{knife:true,selected:"KNIFE",inventory_slots:10,inventory_capacity:10,
+    backpack_weight:12.6,weapon_speed_multiplier:1,backpack_speed_multiplier:.7}});
+  assert.match(nodes.backpackCapacity.textContent,/10\/10 POSTI · 12.6 kg · MOBILITÀ 70%/);
+  assert.equal(nodes.dropItemBtn.disabled,false);
+  handlers.keydown({key:"g",code:"KeyG",repeat:false,preventDefault(){}});
+  assert.equal(vm.runInContext("inputPacket().drop_item",sandbox),true);
+  vm.runInContext("dropItemPulse=false",sandbox);
+  nodes.dropItemBtn.onclick();
+  assert.equal(vm.runInContext("inputPacket().drop_item",sandbox),true);
+  update(sandbox,{...base,player:{selected:"NONE",inventory_slots:0,backpack_weight:0}});
+  assert.equal(nodes.dropItemBtn.disabled,true);
+});
+
+test("backpack shows quantities for spare knives protection vials and security cards", () => {
+  const {sandbox,nodes}=frontend();
+  update(sandbox,{...base,player:{knife:true,hazmat:true,sample_vial:true,security_card:true,
+    item_quantities:{KNIFE:2,HAZMAT:3,SAMPLE_VIAL:4,SECURITY_CARD:5}}});
+  for (const [kind,count] of [["KNIFE",2],["HAZMAT",3],["SAMPLE_VIAL",4],["SECURITY_CARD",5]]) {
+    const slot=nodes.backpackItems.innerHTML.match(new RegExp(`data-item="${kind}"[^]*?</button>`));
+    assert.ok(slot);
+    assert.match(slot[0],new RegExp(`<b>${count}</b>`));
+  }
+});
+
+test("weapon HUD separates magazine, chamber, reserve and current reload mode", () => {
+  const {sandbox,nodes} = frontend();
+  update(sandbox,{...base,player:{weapon:"PISTOL_SUBSONIC",ammo:1,weapons:["PISTOL_SUBSONIC"],selected:"PISTOL_SUBSONIC",
+    firearm:{magazine:0,chamber:1,capacity:15,reserve:30,reload_mode:"FAST",reload_remaining:.8,subsonic:true}}});
+  assert.match(nodes.weaponStatus.textContent,/RICARICA RAPIDA.*0.8s/);
+  assert.match(nodes.weaponStatus.textContent,/CAR 0\/15.*CANNA 1.*SCORTA 30.*SUB/);
+  assert.match(nodes.backpackItems.innerHTML,/Pistola subsonica/);
+});
+
+test("snack HUD explains actual instant gain, delayed calm and blocked wound recovery", () => {
+  const {sandbox,nodes}=frontend();
+  update(sandbox,{...base,player:{stamina:1,health:.9,snack_effect_remaining:5,snack_stamina_gain:.1,
+    fear:true,snack_eaten:true,calm_seconds:0,superficial_wound:true,healing_blocked:true}});
+  assert.match(nodes.vitalEffects.textContent,/VIGORE \+10% SUBITO · SALUTE INVARIATA/);
+  assert.match(nodes.vitalEffects.textContent,/GUARIGIONE SOSPESA DAI MALUS/);
+  assert.match(nodes.playerCondition.textContent,/SNACK ASSUNTO · CALMA 0.0\/3s/);
+  update(sandbox,{...base,player:{stamina:.4,still_seconds:4,stamina_recovery_multiplier:1.8}});
+  assert.match(nodes.vitalEffects.textContent,/RECUPERO VIGORE ×1.8/);
+  update(sandbox,{...base,player:{stamina:.4,still_seconds:4,exhausted_recovery:true}});
+  assert.match(nodes.vitalEffects.textContent,/DOPO ESAURIMENTO · RITMO NORMALE/);
+});
+
+test("radio log displays only the latest three complete transmissions and escapes content", () => {
+  const {sandbox,nodes}=frontend();
+  update(sandbox,{...base,security:{radio_log:[
+    {sender:'G0',text:'Vecchio'}, {sender:'G1',time:10,text:'Rumore sospetto'},
+    {sender:'G2',time:11,text:'Intruso <avvistato>'}, {sender:'HQ',time:12,text:'SWAT inviata'}]}});
+  const html=nodes.radioMessage.innerHTML;
+  assert.equal((html.match(/class="radio-entry"/g)||[]).length,3);
+  assert.doesNotMatch(html,/Vecchio/);
+  assert.match(html,/Rumore sospetto/);
+  assert.match(html,/Intruso &lt;avvistato&gt;/);
+  assert.match(html,/SWAT inviata/);
+});
+
+test("radar uses authoritative countdowns and evasion follows gunfire alert", () => {
+  const {sandbox,nodes}=frontend();
+  for (const [phase,remaining,title,timer] of [['CONTACT',95,'ALLERTA','95.00'],['SEARCH',99,'EVASIONE','99.00'],['SUSPICIOUS',180,'CAUTELA','03:00']]) {
+    update(sandbox,{...base,security:{source:'GUNFIRE',countdown:{phase,remaining}}});
+    vm.runInContext('updateRadarStatus(2000)',sandbox);
+    assert.equal(nodes.alertTitle.textContent,title);
+    assert.equal(nodes.alertDuration.textContent,timer);
+    assert.equal(nodes.alertDuration.hidden,false);
+  }
 });
 
 
@@ -178,6 +328,23 @@ test("client prediction uses exhaustion fatigue and boost from server", () => {
   assert.equal(vm.runInContext("predictedPlayer.x", sandbox),5.7);
   vm.runInContext(`predictedPlayer.x=5; state.player.exhausted=false; state.player.boost_remaining=2.5; updatePredictedPlayer(1);`,sandbox);
   assert.ok(Math.abs(vm.runInContext("predictedPlayer.x", sandbox) - 7.31) < 1e-6);
+});
+
+test("movement prediction includes the equipped weapon weight and HUD shows extraction", () => {
+  const {sandbox,nodes}=frontend();
+  update(sandbox,{...base,player:{weapon:"RIFLE",weapons:["RIFLE"],selected:"RIFLE",weapon_weight:3.7,
+    weapon_speed_multiplier:.68,draw_remaining:1.2,draw_duration:1.55,
+    firearm:{magazine:20,chamber:1,capacity:30,reserve:30}}});
+  assert.match(nodes.weaponStatus.textContent,/ESTRAZIONE · 1.2s/);
+  assert.match(nodes.weaponStatus.textContent,/3.7 kg · MOBILITÀ 68%/);
+  vm.runInContext(`
+    state={status:"RUNNING",player:{speed_multiplier:.7,weapon_speed_multiplier:.68},
+      gameplay:{walk_speed:2},map:{grid:Array.from({length:20},()=>Array(20).fill(0))}};
+    predictedPlayer={x:5,y:5}; keys.add("KeyD"); updatePredictedPlayer(1);
+  `,sandbox);
+  assert.ok(Math.abs(vm.runInContext("predictedPlayer.x",sandbox)-5.952)<1e-6);
+  vm.runInContext("predictedPlayer.x=5; state.player.backpack_speed_multiplier=.5; updatePredictedPlayer(1);",sandbox);
+  assert.ok(Math.abs(vm.runInContext("predictedPlayer.x",sandbox)-5.476)<1e-6);
 });
 
 test("injury disables sprint prediction and an exhausted crouch budget forces walking", () => {
@@ -337,10 +504,49 @@ test("knife swing and heavy breathing effects render with player postures", () =
 test("gunfire displays general alert immediately during the radio call", () => {
   const {sandbox,nodes} = frontend();
   update(sandbox, {...base,security:{source:"GUNFIRE",alert:"CONTACT",swat_phase:"SPOTTED"}});
-  assert.equal(nodes.alertTitle.textContent,"ALLERTA");
+  assert.equal(nodes.alertTitle.textContent,"DISTURBATO");
+  assert.equal(nodes.alertHud.dataset.phase,"ALLERTA");
   assert.equal(sandbox.document.body.dataset.alarm,"true");
   assert.equal(vm.runInContext('agentPalette({confidence:0,combat_alert:true}).color',sandbox),"rgb(255,89,103)");
   update(sandbox, {...base,security:{alert:"SUSPICIOUS",swat_phase:"QUIET",high_guard:true,threat_level:1}});
   assert.equal(nodes.alertTitle.textContent,"CAUTELA");
   assert.equal(sandbox.document.body.dataset.alarm,"false");
+});
+
+test("radar hides the normal state, shows initial disturbance then phase and elapsed duration", () => {
+  const {sandbox,nodes}=frontend(); let now=100; sandbox.performance.now=()=>now;
+  update(sandbox,{...base,security:{alert:"CALM"}});
+  assert.equal(nodes.alertHud.hidden,true);
+  update(sandbox,{...base,security:{alert:"CONTACT"}});
+  assert.equal(nodes.alertTitle.textContent,"DISTURBATO");
+  assert.equal(nodes.alertDuration.hidden,true);
+  now=1600; vm.runInContext("updateRadarStatus(performance.now())",sandbox);
+  assert.equal(nodes.alertTitle.textContent,"ALLERTA");
+  assert.equal(nodes.alertDuration.textContent,"00:01");
+  assert.equal(nodes.alertDuration.hidden,false);
+  now=3000; update(sandbox,{...base,security:{alert:"SEARCH",contact:{x:3,y:3}}});
+  assert.equal(nodes.alertTitle.textContent,"EVASIONE");
+  assert.equal(nodes.alertDuration.textContent,"00:00");
+  now=6500; vm.runInContext("updateRadarStatus(performance.now())",sandbox);
+  assert.equal(nodes.alertDuration.textContent,"00:03");
+  update(sandbox,{...base,security:{alert:"SUSPICIOUS"}});
+  assert.equal(nodes.radarPanel.dataset.phase,"CAUTELA");
+  assert.equal(nodes.alertTitle.textContent,"CAUTELA");
+  assert.equal(nodes.alertDuration.hidden,true);
+  update(sandbox,{...base,security:{alert:"CALM"}});
+  assert.equal(nodes.alertHud.hidden,true);
+});
+
+test("Enter retries failed missions and advances completed sectors", () => {
+  const {sandbox,handlers,nodes}=frontend(); const sent=[]; sandbox.sentPacket=value=>sent.push(value);
+  vm.runInContext("send=sentPacket",sandbox);
+  for (const status of ["CAPTURED","NEUTRALIZED"]) {
+    update(sandbox,{...base,status,scenario:"routine"});
+    assert.match(nodes.banner.textContent,/INVIO: riprova/);
+    handlers.keydown({key:"Enter",code:"Enter",repeat:false,preventDefault(){}});
+    assert.equal(sent.filter(m=>m.type==="reset").at(-1).scenario,"routine");
+  }
+  update(sandbox,{...base,status:"ESCAPED",level:1});
+  handlers.keydown({key:"Enter",code:"Enter",repeat:false,preventDefault(){}});
+  assert.equal(sent.filter(m=>m.type==="next_level").length,1);
 });

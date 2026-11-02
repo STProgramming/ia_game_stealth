@@ -62,7 +62,7 @@ def test_losing_assigned_helper_escalates_to_swat(game):
 
 
 @pytest.mark.parametrize("confidence", (.3, 1.0))
-def test_hold_policy_cannot_freeze_primary_guard_on_visual(game, confidence):
+def test_hold_policy_cannot_prevent_primary_guard_from_investigating_or_firing(game, confidence):
     game.aux_guards = []
     game.env.guard_pos = np.array([4., 4.], dtype=np.float32)
     game.env.guard_angle = 0
@@ -70,10 +70,14 @@ def test_hold_policy_cannot_freeze_primary_guard_on_visual(game, confidence):
     game.env.visual_confidence = confidence
     game.env.sense = game._sense_primary()
     start = game.env.guard_pos.copy()
+    ammo = game._lead_patrol.ammo
     for _ in range(30):
         game.tick(InputState())
-    assert np.linalg.norm(game.env.guard_pos - start) > .2
-    assert game.state()["guard"]["action"] in {"CHASE", "VERIFY"}
+    if confidence < 1.:
+        assert np.linalg.norm(game.env.guard_pos - start) > .2
+    else:
+        assert game._lead_patrol.ammo < ammo
+    assert game.state()["guard"]["action"] in {"CHASE", "VERIFY", "REPOSITION"}
 
 
 @pytest.mark.parametrize("unit_id", ("G1", "S0"))
@@ -109,8 +113,8 @@ def test_start_has_knife_and_map_supplies_are_reachable_and_consumed_once(game):
     assert snapshot["player"]["weapon"] is None and snapshot["player"]["knife"]
     assert snapshot["player"]["ammo"] == snapshot["player"]["flash"] == snapshot["player"]["smoke"] == 0
     kinds = {p["kind"] for p in game.pickups}
-    assert kinds == {"MAGAZINE", "SMOKE", "BANDAGE", "MEDKIT", "HAZMAT", "SAMPLE_VIAL", "SNACK"}
-    assert not kinds & {"SCRAP", "DIVERSION", "KNIFE", "PISTOL", "AMMO"}
+    assert kinds == {"MAGAZINE", "SMOKE", "BANDAGE", "MEDKIT", "HAZMAT", "SAMPLE_VIAL", "SNACK", "PISTOL_SUBSONIC", "AMMO"}
+    assert not kinds & {"SCRAP", "DIVERSION", "KNIFE", "PISTOL"}
     for item in game.pickups:
         assert game.env._free(*game.env._cell(item["pos"]))
         assert game.env._astar(game.env.player_pos, item["pos"])
@@ -163,6 +167,7 @@ def test_weapon_pickup_shooting_damage_ammo_and_enemy_loot(game):
     game.env.player_pos = pistol["pos"].copy()
     game._collect_pickups()
     game.env.player_pos = np.array([4., 4.], dtype=np.float32)
+    game.equipment.step_draw(game.equipment.draw_duration)
     for _ in range(3):
         game.equipment.fire_cooldown = 0
         game._player_equipment_action(InputState(fire=True, aim_x=8, aim_y=4))

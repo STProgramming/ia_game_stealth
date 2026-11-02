@@ -137,6 +137,11 @@ def test_unconscious_guard_does_not_trigger_casualty_reinforcements(game):
 def test_old_indoor_report_can_clear_through_side_door(game):
     deploy(game,[4,4])
     game.team_contact_age = 30.
+    # Door selection assumes regulars have already evacuated; their handover
+    # and the entry team's wait are covered by test_room_handover.py.
+    for guard in game._active_guards():
+        if not guard.guard_id.startswith('S'):
+            guard.pos = np.array([20.,12.], dtype=np.float32)
     # Leave only the right-side entrance open.
     game.env.grid[10,6] = 1
     for _,guard in game.swat_units:
@@ -155,7 +160,8 @@ def test_old_indoor_report_can_clear_through_side_door(game):
 
 
 def test_entry_uses_grenade_if_flashes_are_exhausted_and_waits_for_blast(game):
-    deploy(game,[24,6])
+    # A deep target keeps the whole stack outside fragmentation range.
+    deploy(game,[24,4])
     for _,guard in game.swat_units:
         guard.flash_count = 0
         game._step_tactical_entry(guard)
@@ -172,6 +178,22 @@ def test_entry_uses_grenade_if_flashes_are_exhausted_and_waits_for_blast(game):
             game._step_tactical_entry(guard)
     assert not game.explosives and game.blasts
     assert all(p['phase']=='CLEAR ROOM' for p in game._room_entries.values())
+
+
+def test_entry_keeps_fragmentation_when_target_is_too_close_to_stack(game):
+    deploy(game,[24,6])
+    for _, guard in game.swat_units:
+        guard.flash_count = 0
+        game._step_tactical_entry(guard)
+    for _, guard in game.swat_units:
+        guard.pos = game._room_entries[guard.guard_id]['stage'].copy()
+    grenades = sum(guard.grenade_count for _, guard in game.swat_units)
+    for _ in range(32):
+        for _, guard in game.swat_units:
+            game._step_tactical_entry(guard)
+    assert not game.explosives
+    assert sum(guard.grenade_count for _, guard in game.swat_units) == grenades
+    assert all(plan['phase'] == 'CLEAR ROOM' for plan in game._room_entries.values())
 
 
 def test_light_wound_bleeds_less_than_severe_wound_and_still_leaves_blood():

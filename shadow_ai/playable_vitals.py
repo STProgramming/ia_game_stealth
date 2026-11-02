@@ -1,5 +1,5 @@
 """Health and fatigue for interactive play, independent of trained observations."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 SWAT_STAMINA_CAPACITY = 2.5
 
@@ -29,6 +29,15 @@ class PlayableVitals:
     snack_eaten: bool = False
     calm_seconds: float = 0.0
     surrendering: bool = False
+    wound_damage: float = 0.
+    pending_wounds: list[float] = field(default_factory=list, repr=False)
+    still_seconds: float = 0.
+    exhausted_recovery: bool = False
+    wound_rest_seconds: float = 0.
+    superficial_healing: bool = False
+    snack_effect_remaining: float = 0.
+    snack_stamina_gain: float = 0.
+    wound_fatigue: float = 0.
 
     def melee_trauma(self, damage, stamina_loss, injury_chance, fear_chance, rng):
         self.health = max(0., self.health - damage)
@@ -60,7 +69,10 @@ class PlayableVitals:
         if self.health <= 0:
             return False
         self.snack_eaten = True
+        before = self.stamina
         self.stamina = min(1., self.stamina + .2)
+        self.snack_stamina_gain = self.stamina - before
+        self.snack_effect_remaining = 6.
         if self.stamina >= .35:
             self.exhausted = False
         return True
@@ -89,6 +101,12 @@ class PlayableVitals:
     def take_hit(self, damage: float) -> None:
         if damage <= 0:
             return
+        actual = min(self.health, damage)
+        if actual <= 0:
+            return
+        self.pending_wounds.append(actual)
+        self.wound_rest_seconds = 0.
+        self.wound_damage = max(self.wound_damage, actual)
         self.health = max(0.0, self.health - damage)
         self.bleeding = min(1.0, self.bleeding + damage * 2.5)
         self.cancel_treatment()
@@ -139,6 +157,12 @@ class PlayableVitals:
 
     def treat_wound(self) -> None:
         self.bleeding = 0.0
+        self.wound_damage = 0.
+        self.superficial_healing = False
+
+    def consume_wounds(self):
+        wounds, self.pending_wounds = self.pending_wounds, []
+        return wounds
 
     def step_bleeding(self, dt: float, speed: float) -> float:
         """Return lost blood; actual movement increases loss, even during a boost."""
@@ -151,7 +175,9 @@ class PlayableVitals:
         loss = min(self.health, self.bleeding * .006 * severity * effort * dt)
         self.health -= loss
         self.stamina = max(0.0, self.stamina - loss * 5.0 / self.stamina_capacity)
-        self.fatigue = min(.4, self.fatigue + loss * .7)
+        fatigue_gain = min(.4 - self.fatigue, loss * .7)
+        self.fatigue += fatigue_gain
+        self.wound_fatigue = min(self.fatigue, self.wound_fatigue + fatigue_gain)
         # An untreated wound prevents instant recovery of lost vigour.
         self.recovery_delay = max(self.recovery_delay, .5)
         if self.stamina <= 1e-7:
@@ -170,7 +196,10 @@ class PlayableVitals:
                 * (1.15 if self.fear and self.boost_remaining > 0 else 1.))
 
     def step(self, sprinting: bool, dt: float, drain: float = 0.16,
-             fatigue_on_pause: bool = True) -> bool:
+             fatigue_on_pause: bool = True, moving: bool = False) -> bool:
+        self.snack_effect_remaining = max(0., self.snack_effect_remaining - dt)
+        self.exhausted_recovery |= self.exhausted or self.stamina <= 1e-7
+        self.still_seconds = 0. if moving or sprinting else self.still_seconds + dt
         self.hit_stun_remaining = max(0.0, self.hit_stun_remaining - dt)
         running = sprinting and self.can_sprint
         if running:
@@ -180,6 +209,7 @@ class PlayableVitals:
             if self.stamina <= 1e-7:
                 self.stamina = 0.0
                 self.exhausted = True
+                self.exhausted_recovery = True
         else:
             if self.was_running and self.sprint_seconds >= 0.5 and (fatigue_on_pause or self.exhausted):
                 # Each recovery cycle costs speed; sustained rest restores it.
@@ -189,14 +219,40 @@ class PlayableVitals:
             self.recovery_delay = max(0.0, self.recovery_delay - dt)
             recovery_dt = max(0.0, dt - previous_delay)
             if recovery_dt > 0:
-                self.stamina = min(1.0, self.stamina + 0.11 * recovery_dt)
+                # Full exhaustion keeps the ordinary rate until this recovery
+                # cycle is complete; a brief snack cannot bypass that penalty.
+                multiplier = 1. if self.exhausted_recovery else 1. + min(2., self.still_seconds / 5.)
+                self.stamina = min(1.0, self.stamina + 0.11 * multiplier * recovery_dt)
                 if self.stamina >= 0.35:
                     self.exhausted = False
                 if self.stamina >= 0.999:
+                    self.exhausted_recovery = False
                     self.fatigue = max(0.0, self.fatigue - 0.008 * recovery_dt)
+                    self.wound_fatigue = min(self.fatigue, max(0.,self.wound_fatigue - .008 * recovery_dt))
         self.was_running = running
         self.boost_remaining = max(0.0, self.boost_remaining - dt)
+        self._step_superficial_wound(dt, running)
         return running
+
+    @property
+    def healing_blocked(self):
+        return (self.injured or self.fear or self.exhausted or self.exhausted_recovery
+                or self.smoke_exposure > .01 or self.fatigue-self.wound_fatigue > 1e-7 or self.hit_stun_remaining > 0)
+
+    def _step_superficial_wound(self, dt, running):
+        eligible = 0 < self.wound_damage <= .15 and .80 <= self.health < 1. and not self.healing_blocked
+        self.superficial_healing = eligible and not running
+        if not self.superficial_healing:
+            self.wound_rest_seconds = 0.
+            return
+        before = self.wound_rest_seconds
+        self.wound_rest_seconds += dt
+        elapsed = max(0., self.wound_rest_seconds - 30.) - max(0., before - 30.)
+        if elapsed > 0:
+            self.bleeding = max(0., self.bleeding - .0125 * elapsed)
+            self.health = min(1., self.health + .0015 * elapsed)
+            if self.health >= 1.:
+                self.treat_wound()
 
     @property
     def panting(self) -> bool:
@@ -214,4 +270,10 @@ class PlayableVitals:
                 "injured": self.injured, "crouch_remaining": self.crouch_remaining,
                 "can_sprint": self.can_sprint, "can_crouch": self.can_crouch,
                 "fear": self.fear, "snack_eaten": self.snack_eaten,
+                "snack_effect_remaining": self.snack_effect_remaining, "snack_stamina_gain": self.snack_stamina_gain,
+                "still_seconds": self.still_seconds, "exhausted_recovery": self.exhausted_recovery,
+                "stamina_recovery_multiplier": 1. if self.exhausted_recovery else 1. + min(2., self.still_seconds / 5.),
+                "superficial_wound": 0 < self.wound_damage <= .15 and self.health >= .80,
+                "superficial_healing": self.superficial_healing, "healing_blocked": self.healing_blocked,
+                "wound_healing_wait": max(0., 30. - self.wound_rest_seconds),
                 "calm_seconds": self.calm_seconds, "surrendering": self.surrendering}

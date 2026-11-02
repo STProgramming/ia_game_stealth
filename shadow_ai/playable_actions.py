@@ -3,6 +3,7 @@ import math
 import numpy as np
 from .soliton_security import line_clear
 from .playable_equipment import FIREARMS
+from .playable_firearms import base_weapon
 
 
 class PlayerActions:
@@ -60,20 +61,31 @@ class PlayerActions:
     def interaction(self, inp, pos, dt, equipment, vitals, items, clear, busy=False, near_object=False):
         if inp.selected_item:
             equipment.select(inp.selected_item)
+        if equipment.drawing:
+            inp.fire = inp.lethal = inp.choke = inp.attack_held = False
+            self.f_seconds = 0.
         held = inp.interact_held
         if held:
             self.e_seconds += dt
             station = next((i for i in items if i.get("fixed") and
+                            i.get('reserved_by') in (None, 'PLAYER') and
                             np.linalg.norm(i["pos"] - pos) <= 1.2 and clear(pos, i["pos"])), None)
-            if self.station_id is not None and (busy or station is None or station["id"] != self.station_id):
+            if self.station_id is not None and (busy or vitals.treatment != 'MEDKIT' or station is None or station["id"] != self.station_id):
                 vitals.cancel_treatment()
+                for item in items:
+                    if item['id'] == self.station_id:
+                        item.pop('reserved_by', None)
                 self.station_id = None
             if self.e_seconds >= .25 and not busy and station is not None and self.station_id is None:
                 if vitals.start_treatment("MEDKIT"):
                     self.station_id = station["id"]
+                    station['reserved_by'] = 'PLAYER'
         else:
             if self.station_id is not None:
                 vitals.cancel_treatment()
+                for item in items:
+                    if item['id'] == self.station_id:
+                        item.pop('reserved_by', None)
                 self.station_id = None
             if 0 < self.e_seconds < .25 or inp.interact:
                 inp.interact = True
@@ -95,7 +107,9 @@ class PlayerActions:
         vitals.step_treatment(dt)
         if self.station_id is not None and finished and vitals.health > 0:
             items[:] = [i for i in items if i["id"] != self.station_id]
-            return self.station_id
+            used_station = self.station_id
+            self.station_id = None
+            return used_station
         return None
 
     def step(self, inp, pos, dt):
@@ -213,6 +227,7 @@ def spend_energy(vitals, cost):
 
 
 def projectile_damage(health, armor, vitals, shield, angle, pos, origin, weapon):
+    weapon = base_weapon(weapon)
     delta = origin - pos
     facing = np.array([math.cos(angle), math.sin(angle)])
     frontal = np.dot(facing, delta / max(float(np.linalg.norm(delta)), 1e-6)) >= .5
@@ -232,4 +247,6 @@ def projectile_damage(health, armor, vitals, shield, angle, pos, origin, weapon)
         absorbed = min(armor, reduction)
         armor = max(0., armor - absorbed)
         raw = min(raw, raw * (.14 if weapon == "RIFLE" else .07) + raw * (1 - absorbed / reduction))
-    return max(0., health - raw), armor, "ARMOR" if armor > 0 else "HIT"
+    vitals.health = health
+    vitals.take_hit(raw)
+    return vitals.health, armor, "ARMOR" if armor > 0 else "HIT"

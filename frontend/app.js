@@ -1,5 +1,6 @@
 const canvas = document.getElementById("game");
-const ctx = canvas.getContext("2d");
+const radarCanvas = document.getElementById("radar") || canvas;
+const ctx = radarCanvas.getContext("2d");
 
 const ui = {
   banner: document.getElementById("banner"),
@@ -17,6 +18,12 @@ let lastStaticMap = null;
 let predictedPlayer = null;
 let predictionKey = "";
 let lastRenderTime = performance.now();
+let lastRadarTime = -Infinity;
+let radarPhase = "";
+let radarPhaseSince = 0;
+let radarJammedSince = null;
+let radarClockSession = "";
+let radarFrozenAt = null;
 const keys = new Set();
 let interactPulse = false;
 let craftPulse = false;
@@ -27,6 +34,10 @@ let smokePulse = false;
 let bandagePulse = false;
 let medkitPulse = false;
 let divePulse = false;
+let reloadPulse = false;
+let fastReloadPulse = false;
+let dropItemPulse = false;
+let lastReloadPress = null;
 let crouchToggled = false;
 let selectedItem = "";
 let ePressedAt = null;
@@ -107,6 +118,8 @@ function connect() {
         `${incoming.revision}:${incoming.mode}:${incoming.scenario}:${incoming.status}`;
 
       if (!predictedPlayer || newPredictionKey !== predictionKey) {
+        lastReloadPress = null;
+        reloadPulse = fastReloadPulse = false;
         crouchToggled = false;
         selectedItem = "";
         renderedAgents.clear();
@@ -126,6 +139,7 @@ function connect() {
       }
 
       state = incoming;
+      window.shadowAudio?.update(incoming);
       refreshUI();
     }
   };
@@ -160,6 +174,9 @@ function inputPacket() {
     lethal: lethalPulse,
     choke: false,
     fire: keys.has("KeyH") || fireHeld,
+    reload: reloadPulse,
+    fast_reload: fastReloadPulse,
+    drop_item: dropItemPulse,
     use_flash: false,
     use_smoke: false,
     use_bandage: false,
@@ -171,6 +188,7 @@ function inputPacket() {
 
 setInterval(() => {
   send(inputPacket());
+  selectedItem = "";
   interactPulse = false;
   craftPulse = false;
   throwPulse = false;
@@ -180,6 +198,9 @@ setInterval(() => {
   bandagePulse = false;
   medkitPulse = false;
   divePulse = false;
+  reloadPulse = false;
+  fastReloadPulse = false;
+  dropItemPulse = false;
 }, 16);
 
 function inputCode(e) {
@@ -194,7 +215,7 @@ window.addEventListener("keydown", (e) => {
   if ([
     "KeyW","KeyA","KeyS","KeyD","ArrowUp","ArrowDown","ArrowLeft","ArrowRight",
     "ShiftLeft","ShiftRight","KeyC","Space","KeyE",
-    "KeyQ","KeyF","KeyH"
+    "KeyQ","KeyF","KeyH","KeyR","KeyG"
   ].includes(code)) e.preventDefault();
 
 
@@ -202,6 +223,7 @@ window.addEventListener("keydown", (e) => {
   if (!e.repeat && code === "KeyE") ePressedAt = performance.now();
   if (!e.repeat && code === "KeyF") fPressedAt = performance.now();
   if (!e.repeat && code === "KeyQ") throwPulse = true;
+  if (!e.repeat && code === "KeyG") dropItemPulse = true;
   if (!e.repeat && code === "KeyC" && !keys.has(code)) crouchToggled = !crouchToggled;
   if (!e.repeat && code === "Space") divePulse = true;
 
@@ -209,10 +231,25 @@ window.addEventListener("keydown", (e) => {
 
 
 
-  if (!e.repeat && code === "KeyR") send({type:"reset", scenario: state?.scenario});
+  if (!e.repeat && code === "KeyR") {
+    const now = performance.now();
+    fastReloadPulse = lastReloadPress !== null && now - lastReloadPress <= 280;
+    reloadPulse = true;
+    lastReloadPress = fastReloadPulse ? null : now;
+  }
+  if (!e.repeat && code === "Backspace") {
+    e.preventDefault(); send({type:"reset", scenario: state?.scenario});
+  }
   if (!e.repeat && code === "KeyV") toggleVision();
+  if (!e.repeat && code === "KeyT") window.shadowScene?.toggleOverview();
   if (!e.repeat && code === "KeyM") ui.semantic.checked = !ui.semantic.checked;
-  if (!e.repeat && code === "Enter" && state?.status === "ESCAPED") send({type:"next_level"});
+  if (!e.repeat && code === "Enter") {
+    if (["CAPTURED", "NEUTRALIZED"].includes(state?.status) || (state?.status === "ESCAPED" && state.level >= 3)) {
+      e.preventDefault(); send({type:"reset", scenario:state.scenario});
+    } else if (state?.status === "ESCAPED") {
+      e.preventDefault(); send({type:"next_level"});
+    }
+  }
   if (!e.repeat && code === "F11") {
     e.preventDefault();
     if (document.fullscreenElement) document.exitFullscreen();
@@ -228,7 +265,7 @@ window.addEventListener("keyup", (e) => {
   if (code === "KeyF") { if (fPressedAt !== null && performance.now()-fPressedAt<220) lethalPulse=true; fPressedAt=null; }
   keys.delete(code); send(inputPacket());
 }, true);
-window.addEventListener("blur", () => { keys.clear(); stopDrag(); send(inputPacket()); });
+window.addEventListener("blur", () => { keys.clear(); lastReloadPress = null; stopDrag(); send(inputPacket()); });
 
 canvas.addEventListener("pointermove", (e) => {
   if (movementPointer && movementPointer.id === e.pointerId) {
@@ -270,14 +307,14 @@ canvas.addEventListener("pointercancel", () => { stopDrag(); send(inputPacket())
 canvas.addEventListener("contextmenu", e => e.preventDefault());
 
 function resize() {
-  const rect = canvas.getBoundingClientRect();
+  const rect = radarCanvas.getBoundingClientRect();
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  canvas.width = Math.floor(rect.width * dpr);
-  canvas.height = Math.floor(rect.height * dpr);
+  radarCanvas.width = Math.max(1, Math.floor(rect.width * dpr));
+  radarCanvas.height = Math.max(1, Math.floor(rect.height * dpr));
   ctx.setTransform(dpr,0,0,dpr,0,0);
 }
 window.addEventListener("resize", resize);
-new ResizeObserver(resize).observe(canvas);
+new ResizeObserver(resize).observe(radarCanvas);
 setTimeout(resize, 0);
 
 function renderLoop(now) {
@@ -285,7 +322,14 @@ function renderLoop(now) {
   lastRenderTime = now;
   updatePredictedPlayer(dt);
   updateRenderedAgents(dt);
-  draw();
+  updateRadarStatus(now);
+  if (window.shadowScene && !window.shadowSceneError) {
+    window.shadowScene.render(state, {
+      player: predictedPlayer, facing: facingAngle, displayed: displayedAgent,
+      colorFor: agentPalette, vision: ui.vision.checked, now, itemNames,
+    });
+  }
+  if (now - lastRadarTime > 66) { draw(); lastRadarTime = now; }
   requestAnimationFrame(renderLoop);
 }
 requestAnimationFrame(renderLoop);
@@ -330,6 +374,8 @@ function updatePredictedPlayer(dt) {
     if (state.player.boost_remaining > 0) speed *= 1.65;
   }
   speed *= state.player.speed_multiplier ?? 1;
+  speed *= state.player.weapon_speed_multiplier ?? 1;
+  speed *= state.player.backpack_speed_multiplier ?? 1;
   if (state.player.flashed) speed *= .28;
 
   const dx = dir.x * speed * dt;
@@ -355,6 +401,13 @@ function updatePredictedPlayer(dt) {
 function alertPresentation(current) {
   if (current.gameplay?.spawn_protected || (current.gameplay?.spawn_grace || 0) > 0) return {title: "NORMALE", detail: "Punto d'infiltrazione sicuro", alarm: false};
   const security = current.security || {};
+  if (security.countdown) {
+    const phase = security.countdown.phase;
+    if (phase === "CONTACT") return {title:"ALLERTA", detail:"Intruso segnalato · Perdi la visuale nemica per accelerare il conto alla rovescia", alarm:true};
+    if (phase === "SEARCH") return {title:"EVASIONE", detail:"Ricerca sull’ultimo punto noto", alarm:false};
+    if (phase === "SUSPICIOUS") return {title:"CAUTELA", detail:"Sorveglianza rafforzata", alarm:false};
+    return {title:"NORMALE",detail:"Nessun contatto confermato",alarm:false};
+  }
   const dialogue = Object.values(security.dialogue || {}).filter(Boolean).slice(-2).join(" · ");
   if (current.mode === "swat" && !security.alert) return {title: "ALLERTA", detail: "Intervento della SWAT", alarm: true};
   if (security.source === "GUNFIRE" && ["CONTACT", "SEARCH"].includes(security.alert)) return {title:"ALLERTA", detail:"Colpi di arma da fuoco - Allerta generale", alarm:true};
@@ -373,12 +426,28 @@ function alertPresentation(current) {
 function refreshUI() {
   if (!state) return;
   const alert = alertPresentation(state);
-  ui.hud.hidden = !alert.title;
-  ui.hud.dataset.phase = alert.title;
-  if (ui.title.textContent !== alert.title) ui.title.textContent = alert.title;
+  updateRadarStatus(performance.now());
   if (ui.detail.textContent !== alert.detail) ui.detail.textContent = alert.detail;
   document.body.dataset.alarm = String(alert.alarm);
+  const radio = document.getElementById("radioMessage");
+  if (radio) {
+    const messages = state.security?.radio_log || Object.entries(state.security?.dialogue || {}).filter(([,text]) => text).map(([sender,text])=>({sender,text}));
+    const entries = messages.slice(-3);
+    const markup = entries.map(entry => {
+      const time = entry.time == null ? "" : `${String(Math.floor(entry.time/60)).padStart(2,"0")}:${String(Math.floor(entry.time%60)).padStart(2,"0")} `;
+      const text = `${time}${entry.sender} · ${entry.text}`.replace(/[&<>"']/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
+      return `<p class="radio-entry">${text}</p>`;
+    }).join("");
+    if (radio.dataset.logKey !== markup) { radio.innerHTML = markup; radio.dataset.logKey = markup; }
+    radio.hidden = !entries.length;
+  }
   document.getElementById("levelLabel").textContent = `SETTORE ${String(state.level || 1).padStart(2, "0")} / 03`;
+  const learningStatus = document.getElementById("learningStatus");
+  if (learningStatus) {
+    const lesson = state.previous_learning;
+    learningStatus.hidden = !lesson;
+    learningStatus.textContent = lesson ? `IA · ${lesson.status === "TRAINED" ? "PERCORSO APPRESO" : lesson.status === "FAILED" ? "APPRENDIMENTO NON RIUSCITO" : "ANALISI DEL PERCORSO"} · SETTORE ${String(lesson.level || 1).padStart(2,"0")}` : "";
+  }
   const briefing=state.mission;
   const missionTitle=document.getElementById("missionTitle"), missionObjective=document.getElementById("missionObjective"), requirements=document.getElementById("missionRequirements");
   if (missionTitle) missionTitle.textContent=briefing ? `MISSIONE ${briefing.level} / 3 · ${briefing.title}` : "MISSIONE / INFILTRAZIONE";
@@ -393,24 +462,58 @@ function refreshUI() {
   refreshPlayerHUD(gear);
   const weapon = gear.weapon ? (itemNames[gear.weapon] || gear.weapon).toUpperCase() : "DISARMATO";
   document.getElementById("equipmentLabel").textContent = `${weapon}${gear.weapon ? ` ${gear.ammo || 0}` : ""}${gear.knife ? " · COLTELLO" : ""} · B ${gear.flash || 0} · N ${gear.smoke || 0} · BENDE ${gear.bandages || 0} · KIT ${gear.medkits || 0}`;
-  document.getElementById("radarCoords").textContent = `X ${(state.player?.x || 0).toFixed(1).padStart(4,"0")} / Y ${(state.player?.y || 0).toFixed(1).padStart(4,"0")}`;
+  document.getElementById("radarCoords").textContent = radarDisturbed(state) ? "SEGNALE ASSENTE" : `X ${(state.player?.x || 0).toFixed(1).padStart(4,"0")} / Y ${(state.player?.y || 0).toFixed(1).padStart(4,"0")}`;
   let outcome = "";
-  if (state.status === "ESCAPED") outcome = state.level < 3 ? "Livello completato - INVIO: prossimo livello" : "Missione completata";
-  else if (state.status === "CAPTURED") outcome = "Catturato - R: riprova";
-  else if (state.status === "NEUTRALIZED") outcome = "Neutralizzato - R: riprova";
+  if (state.status === "ESCAPED") outcome = state.level < 3 ? "Livello completato - INVIO: prossimo livello" : "Missione completata - INVIO: riprova";
+  else if (state.status === "CAPTURED") outcome = "Catturato - INVIO: riprova";
+  else if (state.status === "NEUTRALIZED") outcome = "Neutralizzato - INVIO: riprova";
   const learning = state.learning || {};
   if (outcome && learning.status === "TRAINING") outcome += " · IA in addestramento";
   if (outcome && learning.status === "TRAINED") outcome += " · IA aggiornata";
   if (outcome && learning.status === "FAILED") outcome += " · Addestramento non riuscito";
-  ui.banner.textContent = outcome;
-  ui.banner.classList.toggle("hidden", !outcome);
+  const message = outcome || window.shadowSceneError || "";
+  ui.banner.textContent = message;
+  ui.banner.classList.toggle("hidden", !message);
+}
+
+function updateRadarStatus(now) {
+  if (!state) return;
+  const session = `${state.revision}:${state.mode}:${state.level}:${state.scenario}`;
+  if (session !== radarClockSession) {
+    radarClockSession = session; radarPhase = ""; radarJammedSince = null; radarFrozenAt = null;
+  }
+  if (state.status === "RUNNING") radarFrozenAt = null;
+  else if (radarFrozenAt === null) radarFrozenAt = now;
+  now = radarFrozenAt ?? now;
+  const title = alertPresentation(state).title;
+  const phase = title === "SPOTTED" ? "ALLERTA" : title;
+  const jammed = phase === "ALLERTA" || phase === "EVASIONE";
+  if (phase !== radarPhase) { radarPhase = phase; radarPhaseSince = now; }
+  if (jammed && radarJammedSince === null) radarJammedSince = now;
+  if (!jammed) radarJammedSince = null;
+  const interrupted = jammed && now-radarJammedSince < 1200;
+  const label = interrupted ? "DISTURBATO" : phase;
+  ui.hud.hidden = phase === "NORMALE";
+  ui.hud.dataset.phase = phase;
+  if (ui.title.textContent !== label) ui.title.textContent = label;
+  const timer = document.getElementById("alertDuration");
+  if (timer) {
+    const countdown = state.security?.countdown;
+    timer.hidden = (countdown ? phase === "NORMALE" : !jammed) || interrupted;
+    const seconds = Math.max(0, Math.floor((now-radarPhaseSince)/1000));
+    const remaining = Math.max(0,countdown?.remaining || 0);
+    const duration = countdown ? phase === "CAUTELA" ? `${String(Math.floor(Math.ceil(remaining)/60)).padStart(2,"0")}:${String(Math.ceil(remaining)%60).padStart(2,"0")}` : remaining.toFixed(2).padStart(5,"0") : `${String(Math.floor(seconds/60)).padStart(2,"0")}:${String(seconds%60).padStart(2,"0")}`;
+    if (timer.textContent !== duration) timer.textContent = duration;
+  }
+  const panel = document.getElementById("radarPanel");
+  if (panel) panel.dataset.phase = phase;
 }
 
 function transform() {
-  const rect = canvas.getBoundingClientRect();
+  const rect = radarCanvas.getBoundingClientRect();
   const w = state?.map?.width || 32;
   const h = state?.map?.height || 20;
-  const pad = 32;
+  const pad = radarCanvas === canvas ? 32 : 10;
   const s = Math.min((rect.width-pad*2)/w, (rect.height-pad*2)/h);
   const ox = (rect.width - w*s)/2;
   const oy = (rect.height - h*s)/2;
@@ -420,7 +523,7 @@ function X(x,t) { return t.ox + x*t.s; }
 function Y(y,t) { return t.oy + y*t.s; }
 
 function draw() {
-  const rect = canvas.getBoundingClientRect();
+  const rect = radarCanvas.getBoundingClientRect();
   ctx.clearRect(0,0,rect.width,rect.height);
   if (!state?.map) return;
   const t = transform();
@@ -431,43 +534,80 @@ function draw() {
 
   ctx.save();
   ctx.beginPath(); ctx.rect(t.ox,t.oy,t.w*t.s,t.h*t.s); ctx.clip();
-  drawGrid(t);
-  drawZones(t);
-  drawAccessDoors(t);
-
-  drawSemantic(t);
-  drawIntel(t);
-  drawPickups(t);
-  drawSmoke(t);
-  drawBlood(t);
-  drawExplosives(t);
-
-  drawDiversions(t);
-  drawNoise(t);
-  for (const shot of state.shots || []) {
-    ctx.strokeStyle = `rgba(255,210,120,${Math.min(1,shot.ttl/.12)})`;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.moveTo(X(shot.from.x,t),Y(shot.from.y,t));
-    ctx.lineTo(X(shot.to.x,t),Y(shot.to.y,t)); ctx.stroke();
-  }
-  drawCameras(t);
-  drawBodies(t);
-
-  if (state.mode === "guard") drawGuardMode(t);
-  else drawSwatMode(t);
-
-  drawPlayer(t);
-  drawExit(t);
+  const disturbed = radarDisturbed(state);
+  if (disturbed) drawRadarJamming(t);
+  else drawSimpleRadar(t);
   ctx.restore();
-  drawBorder(t);
-  drawRadarOverlay(t);
-  if (movementPointer) {
+  const panel = document.getElementById("radarPanel");
+  if (panel) panel.dataset.signal = disturbed ? "jammed" : "clear";
+  if (movementPointer && radarCanvas === canvas) {
     const x = movementPointer.x - rect.left, y = movementPointer.y - rect.top;
     ctx.strokeStyle = "rgba(98,215,255,.35)"; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.arc(x,y,30,0,Math.PI*2); ctx.stroke();
     ctx.fillStyle = "rgba(98,215,255,.65)";
     ctx.beginPath(); ctx.arc(x+dragDirection.x*20,y+dragDirection.y*20,6,0,Math.PI*2); ctx.fill();
   }
+}
+
+function radarDisturbed(current) {
+  return ["ALLERTA", "SPOTTED", "EVASIONE"].includes(alertPresentation(current).title);
+}
+
+function drawSimpleRadar(t) {
+  ctx.fillStyle = "#0c1e26";
+  ctx.fillRect(t.ox, t.oy, t.w*t.s, t.h*t.s);
+  ctx.globalAlpha = .85;
+  ctx.fillStyle = "#647f85";
+  for (let y=0; y<(state.map.grid?.length || 0); y++) {
+    for (let x=0; x<state.map.grid[y].length; x++) if (state.map.grid[y][x]) {
+      ctx.fillRect(X(x-.5,t),Y(y-.5,t),t.s,t.s);
+    }
+  }
+  for (const door of state.map.doors || []) if (door.locked) ctx.fillRect(X(door.x-.5,t),Y(door.y-.5,t),t.s,t.s);
+  ctx.globalAlpha = 1;
+  drawRadarContacts(t);
+  const player = predictedPlayer || state.player;
+  if (player) drawRadarMarker(player, t, "#d5f4dd", facingAngle, 3.5);
+}
+
+function drawRadarMarker(point, t, color, angle=0, size=2.5) {
+  ctx.save(); ctx.translate(X(point.x,t),Y(point.y,t)); ctx.rotate(angle);
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.moveTo(size*1.5,0); ctx.lineTo(-size,-size); ctx.lineTo(-size,size); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+function drawRadarContacts(t) {
+  const contacts = [...(state.guards || (state.guard ? [state.guard] : [])), ...(state.swat || [])];
+  for (const source of contacts) {
+    if (!source.alive || source.unconscious) continue;
+    const agent = displayedAgent(source), palette = agentPalette(agent);
+    if (ui.vision.checked) drawVision(agent,t,palette);
+    drawRadarMarker(agent,t,palette.color,agent.angle || 0);
+  }
+  for (const source of state.cameras || []) if (source.online) {
+    const camera = displayedAgent(source);
+    if (ui.vision.checked) drawVision(camera,t,agentPalette(camera));
+    ctx.fillStyle = "#87b3c0"; ctx.fillRect(X(camera.x,t)-1.5,Y(camera.y,t)-1.5,3,3);
+  }
+}
+
+function drawRadarJamming(t) {
+  const time = performance.now() / 1000;
+  ctx.save(); ctx.beginPath(); ctx.rect(t.ox,t.oy,t.w*t.s,t.h*t.s); ctx.clip();
+  const width=t.w*t.s, height=t.h*t.s;
+  ctx.fillStyle="#071119"; ctx.fillRect(t.ox,t.oy,width,height);
+  for (let i=0;i<32;i++) {
+    const phase=Math.sin(i*127.1+Math.floor(time*14)*17.7)*43758.5453;
+    const jitter=phase-Math.floor(phase);
+    const y=t.oy+((i/32+time*.06)%1)*height;
+    ctx.fillStyle=`rgba(153,187,194,${.04+jitter*.16})`;
+    ctx.fillRect(t.ox+jitter*width*.18,y,width*(.5+jitter*.5),1+jitter*2);
+  }
+  const sweep=(time*37)%Math.max(1,height);
+  ctx.fillStyle="rgba(177,203,205,.2)"; ctx.fillRect(t.ox,t.oy+sweep,width,4);
+  ctx.fillStyle="rgba(4,13,19,.92)"; ctx.fillRect(t.ox,t.oy+height*.43,width,height*.2);
+  ctx.restore();
 }
 
 function drawGrid(t) {
@@ -788,8 +928,16 @@ function drawVision(a,t,palette) {
   const x=X(a.x,t), y=Y(a.y,t);
   const range=(a.vision_range || 8)*t.s;
   ctx.beginPath();
-  ctx.moveTo(x,y);
-  for (const point of visionOutline(a, state.map.grid)) ctx.lineTo(X(point.x,t),Y(point.y,t));
+  const outline = visionOutline(a, state.map.grid);
+  for (const [i,point] of outline.entries()) {
+    if (!i) ctx.moveTo(X(point.x,t),Y(point.y,t));
+    else ctx.lineTo(X(point.x,t),Y(point.y,t));
+  }
+  for (const point of [...outline].reverse()) {
+    const dx=point.x-a.x,dy=point.y-a.y,length=Math.hypot(dx,dy);
+    const ratio=length>0 ? Math.min(1,(a.vision_inner_range || 0)/length) : 0;
+    ctx.lineTo(X(a.x+dx*ratio,t),Y(a.y+dy*ratio,t));
+  }
   ctx.closePath();
   const gradient = ctx.createRadialGradient(x,y,0,x,y,range);
   gradient.addColorStop(0,`rgba(${palette.rgb},.28)`);
@@ -805,6 +953,15 @@ function drawMemory(p,t,text) {
   ctx.beginPath(); ctx.arc(x,y,7,0,Math.PI*2); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(x-9,y); ctx.lineTo(x+9,y); ctx.moveTo(x,y-9); ctx.lineTo(x,y+9); ctx.stroke();
   label(x+10,y+12,text,"#ffcf67");
+}
+
+function enemyActionLabel(agent) {
+  if (!agent.observed || !agent.alive || agent.unconscious) return "";
+  if ((agent.shield || agent.role === "SHIELD") && (agent.suppression_timer || 0) > 0) return "SCUDO SOTTO FUOCO";
+  if (agent.draw_remaining > 0) return "CAMBIO ARMA";
+  if (agent.firearm?.reload_mode) return agent.firearm.reload_mode === "FAST" ? "RICARICA RAPIDA" : "RICARICA";
+  if (agent.secondary_weapon && agent.weapon === agent.secondary_weapon) return "PISTOLA SECONDARIA";
+  return "";
 }
 
 function drawAgent(a,t,char,color,action,down=false) {
@@ -823,14 +980,20 @@ function drawAgent(a,t,char,color,action,down=false) {
   ctx.lineTo(-tail,tail);
   ctx.closePath();
   ctx.fill();
+  if (a.observed && !down && Math.abs(a.lean_amount || 0) > .1) {
+    const lean = Math.max(-1,Math.min(1,a.lean_amount));
+    ctx.shadowBlur=0; ctx.strokeStyle="#dce8ef"; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(tip,lean*tail*1.3); ctx.stroke();
+  }
   if (a.shield && !down) {
-    ctx.shadowBlur=0; ctx.fillStyle="#263746"; ctx.strokeStyle="#b4c6df"; ctx.lineWidth=1.5;
+    ctx.shadowBlur=0; ctx.fillStyle="#263746"; ctx.strokeStyle=(a.suppression_timer || 0)>0 ? "#ffcf67" : "#b4c6df"; ctx.lineWidth=1.5;
     ctx.fillRect(11,-11,5,22); ctx.strokeRect(11,-11,5,22);
     ctx.fillStyle="#8ed7e2"; ctx.fillRect(12,-4,3,8);
   }
   ctx.restore();
-
-
+  if (a.is_medic && a.observed && !down) label(x+9,y-9,"+ MEDICO","#62f2ad");
+  const equipmentAction = down ? "" : enemyActionLabel(a);
+  if (equipmentAction) label(x+9,y-21,equipmentAction,"#dce8ef");
 }
 
 function playerColor(current) {
@@ -1011,7 +1174,8 @@ function label() {}
 connect();
 
 
-const itemNames = {AMMO:"Munizioni",KNIFE:"Coltello",PISTOL:"Pistola",RIFLE:"Fucile",SHOTGUN:"Canna liscia",SMG:"Mitra",ONE_HAND_SMG:"Mitra a una mano",GRENADE:"Granata",SNACK:"Snack",BANDAGE:"Benda",MEDKIT:"Kit medico",CASING:"Bossolo",MAGAZINE:"Caricatore",FLASH:"Flashbang",SMOKE:"Fumogeno",HAZMAT:"Protezione",SAMPLE_VIAL:"Provetta sterile",SECURITY_CARD:"Scheda sicurezza"};
+const itemNames = {AMMO:"Munizioni",KNIFE:"Coltello",PISTOL:"Pistola",RIFLE:"Fucile",SHOTGUN:"Canna liscia",SMG:"Mitra",ONE_HAND_SMG:"Mitra a una mano",GRENADE:"Granata",SNACK:"Snack",BANDAGE:"Benda",MEDKIT:"Kit medico",CASING:"Bossolo",MAGAZINE:"Caricatore vuoto",FLASH:"Flashbang",SMOKE:"Fumogeno",HAZMAT:"Protezione",SAMPLE_VIAL:"Provetta sterile",SECURITY_CARD:"Scheda sicurezza",
+  PISTOL_SUPPRESSED:"Pistola silenziata",PISTOL_SUBSONIC:"Pistola subsonica",RIFLE_SUPPRESSED:"Fucile silenziato",RIFLE_SUBSONIC:"Fucile subsonico",SMG_SUPPRESSED:"Mitra silenziato",SMG_SUBSONIC:"Mitra subsonico"};
 const itemPaths = {
   SNACK:"M5 3h14v18H5z M5 7h14 M8 10h8 M8 14h8 M5 18h14",
   GRENADE:"M9 3h6v4 M15 4h4v5 M8 8h8l3 5-2 8H7l-2-8z",
@@ -1033,7 +1197,7 @@ const itemPaths = {
   SMOKE:"M8 9h9v12H8z M10 9V6h5v3 M12 6c-5-1 4-3 0-5",
 };
 function itemIcon(kind) {
-  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${itemPaths[kind] || itemPaths.CASING}"/></svg>`;
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${itemPaths[kind] || itemPaths[kind.replace(/_(SUPPRESSED|SUBSONIC)$/, "")] || itemPaths.CASING}"/></svg>`;
 }
 function selectBackpackItem(kind) {
   if (!itemNames[kind]) return;
@@ -1046,17 +1210,27 @@ if (backpack) backpack.onclick = event => {
   const button = event.target.closest("button[data-item]");
   if (button && !button.disabled) selectBackpackItem(button.dataset.item);
 };
+const dropItemButton = document.getElementById("dropItemBtn");
+if (dropItemButton) dropItemButton.onclick = () => {
+  dropItemPulse = true;
+  send(inputPacket());
+  canvas.focus({preventScroll:true});
+};
 function refreshBackpack(gear) {
   const container=document.getElementById("backpackItems");
   if (!container) return;
   const entries=[];
-  if (gear.knife) entries.push(["KNIFE",1]);
-  for (const [kind,key] of [["HAZMAT","hazmat"],["SAMPLE_VIAL","sample_vial"],["SECURITY_CARD","security_card"]]) if (gear[key]) entries.push([kind,1]);
-  for (const weapon of gear.weapons || (gear.weapon ? [gear.weapon] : [])) entries.push([weapon,gear.ammo || 0]);
+  if (gear.knife) entries.push(["KNIFE",gear.item_quantities?.KNIFE ?? 1]);
+  for (const [kind,key] of [["HAZMAT","hazmat"],["SAMPLE_VIAL","sample_vial"],["SECURITY_CARD","security_card"]]) if (gear[key]) entries.push([kind,gear.item_quantities?.[kind] ?? 1]);
+  for (const weapon of gear.weapons || (gear.weapon ? [gear.weapon] : [])) entries.push([weapon,gear.weapon_ammo?.[weapon] ?? gear.ammo ?? 0]);
   for (const [kind,key] of [["AMMO","ammo"],["BANDAGE","bandages"],["MEDKIT","medkits"],["CASING","casings"],["MAGAZINE","magazines"],["FLASH","flash"],["SMOKE","smoke"],["GRENADE","grenades"],["SNACK","snacks"]]) {
-    if (gear[key]>0) entries.push([kind,gear[key]]);
+    const count = kind === "AMMO" ? gear.loose_ammo ?? gear.ammo_stock ?? gear.ammo : gear[key];
+    if (count>0) entries.push([kind,count]);
   }
   const current=gear.selected || "KNIFE";
+  const capacity=document.getElementById("backpackCapacity");
+  if (capacity) capacity.textContent=`${gear.inventory_slots ?? entries.length}/${gear.inventory_capacity ?? 10} POSTI · ${(gear.backpack_weight ?? 0).toFixed(1)} kg · MOBILITÀ ${Math.round((gear.weapon_speed_multiplier ?? 1)*(gear.backpack_speed_multiplier ?? 1)*100)}%`;
+  if (dropItemButton) dropItemButton.disabled=!entries.some(([kind])=>kind===current);
   const markup=entries.map(([kind,count])=>`<button type="button" class="pack-slot ${kind===current ? "selected" : ""}" data-item="${kind}" aria-pressed="${kind===current}" title="Seleziona ${itemNames[kind]}">${itemIcon(kind)}<span>${itemNames[kind]}</span><b>${count}</b></button>`).join("") || '<span class="pack-empty">Zaino vuoto</span>';
   const renderKey=JSON.stringify({entries,current});
   if (container.dataset.renderKey!==renderKey) {
@@ -1064,9 +1238,15 @@ function refreshBackpack(gear) {
     container.dataset.renderKey=renderKey;
   }
   const selected=document.getElementById("selectedItemLabel");
-  if (selected) selected.textContent=current === "NONE" ? "Nessun oggetto equipaggiato" : `${itemNames[current] || "Nessun oggetto"} · ${current === "HAZMAT" ? "Indossata" : current === "SAMPLE_VIAL" ? "E sul campione per prelevare" : current === "SECURITY_CARD" ? "Accesso R&D" : current === "AMMO" ? "Scorta munizioni" : current === "KNIFE" ? "F attacca · tieni F per soffocare" : ["CASING","MAGAZINE"].includes(current) ? "Q per lanciare" : "E breve per usare"}`;
+  if (selected) selected.textContent=current === "NONE" ? "Nessun oggetto equipaggiato" : `${itemNames[current] || "Nessun oggetto"} · ${current === "SNACK" ? "E · +20% vigore subito · non cura la salute" : current === "HAZMAT" ? "Indossata" : current === "SAMPLE_VIAL" ? "E sul campione per prelevare" : current === "SECURITY_CARD" ? "Accesso R&D" : current === "AMMO" ? "Scorta munizioni" : current === "KNIFE" ? "F attacca · tieni F per soffocare" : ["CASING","MAGAZINE"].includes(current) ? "Q per lanciare" : "E breve per usare"}`;
 }
 function refreshPlayerHUD(gear) {
+  const weaponStatus = document.getElementById("weaponStatus");
+  if (weaponStatus) {
+    const gun = gear.firearm;
+    weaponStatus.textContent = gun ? `${state.player.draw_remaining > 0 ? `ESTRAZIONE · ${state.player.draw_remaining.toFixed(1)}s\n` : gun.reload_mode ? `RICARICA ${gun.reload_mode === "FAST" ? "RAPIDA" : "TATTICA"} · ${gun.reload_remaining.toFixed(1)}s\n` : ""}CAR ${gun.magazine}/${gun.capacity} + CANNA ${gun.chamber} · SCORTA ${gun.reserve}${gun.subsonic ? " · SUB" : gun.suppressed ? " · SIL" : ""}\n${(state.player.weapon_weight || 0).toFixed(1)} kg · MOBILITÀ ${Math.round((state.player.weapon_speed_multiplier ?? 1)*100)}%` : "";
+    weaponStatus.hidden = !gun;
+  }
   for (const [key,id] of [["health","playerHealth"],["stamina","playerStamina"]]) {
     const bar=document.getElementById(id+"Fill"), value=document.getElementById(id+"Value");
     const percent=Math.round(Math.max(0,Math.min(1,gear[key] ?? 1))*100);
@@ -1075,5 +1255,16 @@ function refreshPlayerHUD(gear) {
   }
   const status=document.getElementById("playerCondition");
   if (status) status.textContent=gear.treatment ? `${gear.station_id ? "TIENI E · " : ""}${gear.treatment==="BANDAGE" ? "Benda" : "Kit medico"} · ${gear.treatment_remaining.toFixed(1)}s` : gear.smoke_exposure>0 ? (gear.exhausted ? "FUMO · ESAUSTO" : "FUMO · VIGORE IN CALO") : gear.bleeding>0 ? "FERITO · SANGUINAMENTO" : gear.regen_remaining>0 ? "RECUPERO GRADUALE" : gear.diving ? "TUFFO" : "OPERATIVO";
-  if (status && (gear.injured || gear.fear)) status.textContent = [gear.injured ? `INFORTUNIO · SERVE MEDIKIT · C ${Math.ceil(gear.crouch_remaining)}s` : "",gear.fear ? "PAURA · SALUTE E VIGORE 100% + SNACK" : ""].filter(Boolean).join(" · ");
+  if (status && (gear.injured || gear.fear)) status.textContent = [gear.injured ? `INFORTUNIO · SERVE MEDIKIT · C ${Math.ceil(gear.crouch_remaining)}s` : "",gear.fear ? gear.snack_eaten ? `SNACK ASSUNTO · CALMA ${Number(gear.calm_seconds || 0).toFixed(1)}/3s · SERVONO SALUTE E VIGORE 100%` : "PAURA · SALUTE E VIGORE 100% + SNACK" : ""].filter(Boolean).join(" · ");
+  const effects = document.getElementById("vitalEffects");
+  if (effects) {
+    const lines = [];
+    if (gear.snack_effect_remaining > 0) lines.push(`SNACK · VIGORE +${Math.round((gear.snack_stamina_gain || 0)*100)}% SUBITO · SALUTE INVARIATA`);
+    if (gear.stamina < .999 && gear.still_seconds > .5) lines.push(gear.recovery_delay > 0 ? `RECUPERO VIGORE TRA ${gear.recovery_delay.toFixed(1)}s` : gear.exhausted_recovery ? "RECUPERO DOPO ESAURIMENTO · RITMO NORMALE" : `RECUPERO VIGORE ×${(gear.stamina_recovery_multiplier || 1).toFixed(1)} · RESTA FERMO PER ACCELERARE`);
+    if (gear.superficial_wound) lines.push(gear.healing_blocked ? "FERITA SUPERFICIALE · GUARIGIONE SOSPESA DAI MALUS" : gear.wound_healing_wait > 0 ? `FERITA SUPERFICIALE · RIMARGINAZIONE TRA ${Math.ceil(gear.wound_healing_wait)}s` : "FERITA IN RIMARGINAZIONE · SALUTE +0,15%/s");
+    if (gear.regen_remaining > 0) lines.push(`CURA GRADUALE · SALUTE +${Math.round(gear.regen_remaining*100)}% IN ${Math.ceil(gear.regen_seconds)}s`);
+    const text = lines.join("\n");
+    if (effects.textContent !== text) effects.textContent = text;
+    effects.hidden = !text;
+  }
 }

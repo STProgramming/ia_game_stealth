@@ -12,6 +12,10 @@ from .playable_vitals import PlayableVitals
 # One playable guard sensor, shared by the lead, patrols and reinforcements.
 GUARD_VISION_RANGE = 11.5
 GUARD_FOV = 104.0
+CAMERA_PAN_DEGREES = 125.0
+CAMERA_BLIND_RADIUS = 1.25
+BLOOD_FOOTPRINT_SECONDS = 12.0
+BLOOD_WOUND_SECONDS = 45.0
 
 
 def turn_towards(angle: float, target: float, max_turn: float) -> float:
@@ -120,6 +124,9 @@ class SecurityGuard:
     weapon: str = "PISTOL"
     grenade_count: int = 0
     disarmed: bool = False
+    blood_target: Optional[np.ndarray] = None
+    is_medic: bool = False
+    medkits: int = 0
 
     @property
     def active(self) -> bool:
@@ -138,7 +145,7 @@ class SecurityCamera:
     camera_id: str
     pos: np.ndarray
     center_angle: float
-    sweep: float = math.radians(62.0)
+    sweep: float = math.radians(CAMERA_PAN_DEGREES / 2.)
     speed: float = 0.72
     phase: float = 0.0
     angle: float = 0.0
@@ -147,10 +154,16 @@ class SecurityCamera:
     confidence: float = 0.0
     tracking: bool = False
     online: bool = True
+    blind_radius: float = CAMERA_BLIND_RADIUS
 
     def step(self, dt: float) -> None:
         self.phase += dt * self.speed
+        self.sweep = min(max(0., self.sweep), math.radians(CAMERA_PAN_DEGREES / 2.))
         self.angle = self.center_angle + math.sin(self.phase) * self.sweep
+
+    def sees(self, grid, point):
+        return (self.online and np.linalg.norm(point - self.pos) > self.blind_radius
+                and can_see(grid, self.pos, self.angle, point, self.vision_range, self.fov, 0.))
 
 
 @dataclass
@@ -194,4 +207,17 @@ class BloodMark:
     pos: np.ndarray
     age: float = 0.0
     discovered_by: set[str] = field(default_factory=set)
+    kind: str = 'WOUND'
+    radius: float = .16
+    damage: float = 0.
+    lifetime: float = BLOOD_WOUND_SECONDS
+    angle: float = 0.
+
+    @property
+    def active(self):
+        return self.age < self.lifetime
+
+    def snapshot(self):
+        return dict(id=self.mark_id,x=float(self.pos[0]),y=float(self.pos[1]),age=float(self.age),
+                    kind=self.kind,radius=self.radius,damage=self.damage,lifetime=self.lifetime,angle=self.angle)
 

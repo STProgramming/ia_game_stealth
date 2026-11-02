@@ -16,9 +16,14 @@ from .playable_equipment import Equipment, map_pickups, FIREARMS
 from .playable_combat import lane_blocked, firing_position, trace_shot, EnemyMelee, MELEE_RANGE, PLAYER_SPEED_SCALE, MELEE_PROFILES, WEAPONS, swat_loadout, player_shot
 from .playable_threats import RuntimeCombatSystems
 from .playable_smoke import smoke_density, smoke_obscures, smoke_escape
+from .playable_firearms import base_weapon
+from .room_handover import RuntimeRoomHandover
+from .noise_delegation import RuntimeNoiseDelegation
+from .guard_medical import RuntimeGuardMedical, CARE_STATES
 from .playable_facility import build_research_grid, facility_zones
 from .playable_campaign import MISSIONS, mission_layout, campaign_supplies, mission_room_bounds, MAP_WIDTH, MAP_HEIGHT, ARCHIVE_DOORS
 from .swat import SmokeCloud, SwatConfig
+from .doctrine import VisualBand
 
 from . import (
     Config,
@@ -43,6 +48,7 @@ from .soliton_security import (
     line_clear,
     GUARD_FOV,
     GUARD_VISION_RANGE,
+    CAMERA_PAN_DEGREES,
     turn_towards,
 )
 
@@ -106,6 +112,9 @@ class InputState:
     lethal: bool = False
     choke: bool = False
     fire: bool = False
+    reload: bool = False
+    fast_reload: bool = False
+    drop_item: bool = False
     use_flash: bool = False
     use_smoke: bool = False
     use_bandage: bool = False
@@ -135,6 +144,9 @@ class InputState:
             lethal=bool(data.get("lethal")),
             choke=bool(data.get("choke")),
             fire=bool(data.get("fire")),
+            reload=bool(data.get("reload")),
+            fast_reload=bool(data.get("fast_reload")),
+            drop_item=bool(data.get("drop_item")),
             use_flash=bool(data.get("use_flash")),
             use_smoke=bool(data.get("use_smoke")),
             use_bandage=bool(data.get("use_bandage")),
@@ -150,11 +162,15 @@ class InputState:
         )
 
     def merge_transients(self, previous: "InputState") -> None:
+        self.selected_item = self.selected_item or previous.selected_item
         self.interact = self.interact or previous.interact
         self.craft = self.craft or previous.craft
         self.throw = self.throw or previous.throw
         self.lethal = self.lethal or previous.lethal
         self.fire = self.fire or previous.fire
+        self.reload = self.reload or previous.reload
+        self.fast_reload = self.fast_reload or previous.fast_reload
+        self.drop_item = self.drop_item or previous.drop_item
         self.use_flash = self.use_flash or previous.use_flash
         self.use_smoke = self.use_smoke or previous.use_smoke
         self.use_bandage = self.use_bandage or previous.use_bandage
@@ -164,11 +180,15 @@ class InputState:
         self.dive = self.dive or previous.dive
 
     def clear_transients(self) -> None:
+        self.selected_item = ""
         self.interact = False
         self.craft = False
         self.throw = False
         self.lethal = False
         self.fire = False
+        self.reload = False
+        self.fast_reload = False
+        self.drop_item = False
         self.use_flash = False
         self.use_smoke = False
         self.use_bandage = False
@@ -187,7 +207,7 @@ class InputState:
         )
 
 
-class InteractiveGuardRuntime(RuntimeCombatSystems):
+class InteractiveGuardRuntime(RuntimeGuardMedical, RuntimeNoiseDelegation, RuntimeRoomHandover, RuntimeCombatSystems):
     MODE = "guard"
 
     def __init__(self, model_path: Path, seed: int = 71) -> None:
@@ -374,6 +394,8 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         self.last_phase = self.env._tactical_phase(self.env._decision_context())
         self._interact_latch = False
         self._setup_security()
+        self._reset_room_handover()
+        self._reset_noise_delegation()
         self.equipment = Equipment(knife=True)
         self.equipment.security_card = 'SECURITY_CARD' in self.campaign_items
         self.player_actions = PlayerActions()
@@ -397,6 +419,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         self._lead_patrol = SecurityGuard("G0", self.env.guard_pos.copy(), self.env.guard_angle, route)
         self._lead_patrol.patrol_index = min(range(len(route)), key=lambda i: np.linalg.norm(self.env.guard_pos - route[i]))
         self._primary_patrol_action = None
+        self._reset_guard_medical()
 
     def _setup_security(self) -> None:
         routes = [
@@ -424,6 +447,8 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                     pos=start.copy(),
                     angle=angle,
                     patrol=route,
+                    is_medic=idx == 2,
+                    medkits=2 if idx == 2 else 0,
                 )
             )
 
@@ -441,7 +466,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                 camera_id=camera_id,
                 pos=np.asarray(pos, dtype=np.float32),
                 center_angle=angle,
-                sweep=math.radians(50.0),
+                sweep=math.radians(CAMERA_PAN_DEGREES / 2.),
                 phase=idx * 0.77,
                 angle=angle,
             )
@@ -534,9 +559,13 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         self.team_contact = point
         self._player_identified = True
         self.security_compromised = True
+        self.security_cycle.caution()
         self.team_contact_age = 0.0
         self.team_contact_source = source
         self.facility_alert = "CONTACT"
+        self.security_cycle.contact()
+        if changed:
+            self._radio(source, f'Contatto confermato! Intruso in posizione {point[0]:.1f}, {point[1]:.1f}. Informo la squadra.')
         if changed and self.swat_phase == "ACTIVE":
             self.radio_updates += 1
         # The lead receives a reported position, never hidden live truth.
@@ -607,16 +636,19 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         if self.radio_timer > 1e-6:
             return
         if self.swat_phase == "SPOTTED":
+            self._radio(self.radio_source or 'G0', 'Intruso avvistato. Centrale, richiedo intervento SWAT.')
             self.swat_phase = "RADIO"
             self.radio_timer = 2.0
             return
         if self.swat_phase == "RADIO":
+            self._radio('HQ', 'Ricevuto. Squadra SWAT inviata nel settore.')
             self.swat_phase = "DISPATCH"
             self.radio_timer = 1.0
             self.radio_updates += 1
             return
         self.radio_timer = None
         self.swat_phase = "ACTIVE"
+        self._radio('SWAT', 'Squadra sul posto. Armi pronte, controlliamo l’ultimo punto segnalato.')
         for idx, role in enumerate(("SHIELD", "ASSAULT", "LEADER")):
             # All insertion cells are navigable; no unit spawns inside x=46/y=14.
             unit = SecurityGuard(
@@ -628,7 +660,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
             unit.vitals.stamina_capacity = SWAT_STAMINA_CAPACITY
             unit.has_shield = role == "SHIELD"
             unit.weapon = swat_loadout(role, self.seed)
-            unit.ammo = 8 if unit.weapon == 'SHOTGUN' else 24
+            unit.ammo = self._gun_capacity(unit.weapon) + 1
             unit.grenade_count = 0 if unit.has_shield else 1
             unit.exit_pos = unit.pos.copy()
             unit.state = "RESPOND"
@@ -649,7 +681,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
     def _move_primary(self, pos, goal, speed):
         running = goal is not None and np.linalg.norm(goal - pos) > 0.2 and (
             self.env.sense.visual or self.threat_level > 0 or speed > float(self.env.cfg.guard_speed) * 1.05)
-        self._lead_patrol.vitals.step(running, self.game_dt)
+        self._lead_patrol.vitals.step(running, self.game_dt, moving=goal is not None and np.linalg.norm(goal-pos)>.2)
         self._lead_vitals_stepped = True
         speed *= self._lead_patrol.vitals.speed_multiplier
         if running and not self._lead_patrol.vitals.can_sprint:
@@ -699,26 +731,17 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
     def _update_facility_alert(self) -> None:
         if self.spawn_protected and not self.security_compromised:
             self.facility_alert = "CALM"
-        elif self.team_contact is not None:
-            if self.team_contact_age <= 0.5:
-                self.facility_alert = "CONTACT"
-            elif self.team_contact_age <= 12.0 or any(
-                unit.active and unit.state in {"RESPOND", "SEARCH", "VERIFY", "STACK", "BREACH WAIT", "CLEAR ROOM"}
-                for _, unit in self.swat_units
-            ):
-                self.facility_alert = "SEARCH"
-            else:
-                self.facility_alert = "SUSPICIOUS"
-        elif self.security_compromised:
-            self.facility_alert = "SUSPICIOUS"
         else:
-            self.facility_alert = "CALM"
+            if self.security_compromised and self.security_cycle.phase == 'CALM':
+                self.security_cycle.caution()
+            self.facility_alert = self.security_cycle.phase
         if self.security_compromised:
             self.env.alert = max(int(self.env.alert), int(FacilityAlert.SUSPICIOUS))
             self.env.personal_suspicion = max(self.env.personal_suspicion, 0.48)
 
     def _raise_evidence_alert(self, source: str, point=None, observer="G0") -> None:
         self.security_compromised = True
+        self.security_cycle.caution()
         if source in {"BODY FOUND", "GUNFIRE"}:
             self.threat_level = 2
         if source == "BODY FOUND":
@@ -774,6 +797,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         return None if guard is None else guard.pos
 
     def _down_guard(self, guard_id: str, lethal: bool) -> None:
+        self._cancel_guard_care(guard_id)
         if guard_id == "G0":
             pos = self.env.guard_pos.copy()
             angle = float(self.env.guard_angle)
@@ -783,7 +807,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
             self.env.player_velocity[:] = 0.0
         else:
             guard = next((g for g in self.aux_guards + [u for _, u in self.swat_units] if g.guard_id == guard_id), None)
-            if guard is None or not guard.active:
+            if guard is None or not guard.alive or guard.unconscious:
                 return
             pos = guard.pos.copy()
             angle = float(guard.angle)
@@ -807,9 +831,9 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
             if self.threat_level >= 2 or self._player_identified:
                 self._combat_casualties.add(guard_id)
             self._drop_guard_equipment(guard_id, pos)
-            self.blood.append(BloodMark(self._new_id(), pos.copy()))
+            self.blood.append(BloodMark(self._new_id(), pos.copy(),kind='POOL',radius=.45,lifetime=60.))
             if np.linalg.norm(self.env.player_pos - pos) < 1.5:
-                self.bloody_timer = 22.0
+                self.bloody_timer = 10.0
                 self.last_blood_pos = None
             self.noise_events.append(
                 NoiseEvent(
@@ -827,7 +851,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         self.takedown = None
 
     def _process_takedown(self, inp: InputState) -> None:
-        if self.player_actions.movement_locked:
+        if self.player_actions.movement_locked or self.equipment.drawing:
             return
         if self.takedown is not None:
             guard_id = self.takedown["guard_id"]
@@ -932,7 +956,8 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                     or not line_clear(self.env.grid, self.env.player_pos, item["pos"])):
                 continue
             kind, amount = item["kind"], item["amount"]
-            if not self.equipment.collect(kind, amount):
+            if not self.equipment.collect(kind, amount, item.get('firearm')):
+                self.message = "ZAINO PIENO · 10 POSTI · G PER LASCIARE L’OGGETTO SELEZIONATO"
                 continue
             if kind == "SECURITY_CARD":
                 self.campaign_items.add('SECURITY_CARD')
@@ -948,7 +973,12 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         self._equipment_dropped.add(guard_id)
         guard = next((g for g in self.aux_guards + [u for _, u in self.swat_units]
                       if g.guard_id == guard_id), self._lead_patrol)
-        items = [(guard.weapon, guard.ammo), ("MAGAZINE", 1)]
+        weapons = self._enemy_inventory_loot(guard_id, guard)
+        firearms = {kind: firearm for kind, _, firearm in weapons}
+        items = [(kind, amount) for kind, amount, _ in weapons] + [("MAGAZINE", 1)]
+        if guard.medkits > 0:
+            items.append(('MEDKIT', guard.medkits))
+            guard.medkits = 0
         guard.ammo = 0
         if guard_id.startswith("S"):
             items += [("FLASH", guard.flash_count), ("SMOKE", guard.smoke_count)]
@@ -958,7 +988,8 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         for kind, amount in items:
             if kind and (amount or kind in FIREARMS):
                 self.pickups.append({"id": f"{guard_id}-{kind}", "kind": kind, "amount": amount,
-                                     "pos": pos.copy(), "source": guard_id})
+                                     "pos": pos.copy(), "source": guard_id,
+                                     **({'firearm': firearms[kind]} if kind in firearms else {})})
 
     def _equipment_target(self, inp):
         point = np.array([inp.aim_x, inp.aim_y], dtype=np.float32)
@@ -978,6 +1009,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         self.spawn_safe = False
         self.spawn_grace = 0.
         self.security_compromised = True
+        self.security_cycle.caution()
         if source == "SMOKE":
             self.threat_level = max(self.threat_level, 1)
             for guard in self._active_guards():
@@ -1001,6 +1033,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         self._primary_audio_timer = 12.
 
     def _player_equipment_action(self, inp):
+        self._step_player_firearm(inp)
         self.equipment.fire_cooldown = max(0.0, self.equipment.fire_cooldown - self.game_dt)
         if inp.use_smoke and self.equipment.smoke > 0 and spend_energy(self.player_vitals, .12):
             self.equipment.smoke -= 1
@@ -1015,11 +1048,14 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                     guard.blinded_timer = 2.4
             if np.linalg.norm(self.env.player_pos - point) < 3 and line_clear(self.env.grid, point, self.env.player_pos):
                 self.player_flash_timer = 2.4
-        if (not inp.fire or not self.player_vitals.can_aim or self.takedown or self.equipment.fire_cooldown > 0
+        if (not inp.fire or self.equipment.drawing or not self.player_vitals.can_aim or self.takedown or self.equipment.fire_cooldown > 0
                 or self.player_actions.knockdown_remaining > 0 or self.player_actions.rise_timer > 0):
             return
-        if not self.equipment.weapon or self.equipment.ammo <= 0:
-            self.message = "RACCOGLI UN'ARMA E MUNIZIONI [E]"
+        gun = self.equipment.gun()
+        if gun and gun.reload_mode:
+            return
+        if gun is None or not gun.chamber:
+            self.message = "R · RICARICA" if gun else "RACCOGLI UN'ARMA E MUNIZIONI [E]"
             return
         origin = self.env.player_pos.copy()
         delta = np.array([inp.aim_x, inp.aim_y], dtype=np.float32) - origin
@@ -1027,11 +1063,14 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         if distance < .1:
             return
         endpoint, guard = player_shot(self.env.grid,origin,origin+delta,self._active_guards(),self.equipment.weapon,self.rng)
-        if not spend_energy(self.player_vitals, .08 if self.equipment.weapon in {'PISTOL','RIFLE'} else WEAPONS[self.equipment.weapon].energy):
+        if not spend_energy(self.player_vitals, .08 if base_weapon(self.equipment.weapon) in {'PISTOL','RIFLE'} else WEAPONS[self.equipment.weapon].energy):
             return
-        self.equipment.ammo -= 1
-        self.equipment.fire_cooldown = {'RIFLE':.2,'PISTOL':.45}.get(self.equipment.weapon,WEAPONS[self.equipment.weapon].cooldown)
-        self._player_security_event("GUNFIRE", origin)
+        if not self.equipment.fire():
+            return
+        self.equipment.fire_cooldown = {'RIFLE':.2,'PISTOL':.45}.get(base_weapon(self.equipment.weapon),WEAPONS[self.equipment.weapon].cooldown)
+        hit_reaction = guard is not None and self._incoming_hit_context(guard, guard.vitals, origin)
+        self._record_ballistics(origin, endpoint, self.equipment.weapon,
+                                math.atan2(float(delta[1]), float(delta[0])), guard is not None)
         if guard is not None:
             health, guard.armor, effect = projectile_damage(guard.vitals.health, guard.armor,
                 guard.vitals, guard.has_shield, guard.angle, guard.pos, origin, self.equipment.weapon)
@@ -1039,9 +1078,9 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                 self._down_guard(guard.guard_id, lethal=True)
             else:
                 guard.vitals.health = health
+                self._react_to_incoming_hit(guard.guard_id, guard, guard.vitals, origin, hit_reaction)
             self.message = effect
         self.shots.append({"from": _vec(origin), "to": _vec(endpoint), "ttl": .12})
-        self.noise_events.append(NoiseEvent(self._new_id(), origin, 14., .72, "GUNSHOT"))
 
     def _observe_diversion_launch(self, device: ThrownDiversion) -> None:
         if self.spawn_protected:
@@ -1061,6 +1100,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         # Later movement of the hidden thrower never updates this point.
         source = self._navigable_goal(device.start + self.rng.normal(0.0, 0.35, 2).astype(np.float32))
         self.security_compromised = True
+        self.security_cycle.caution()
         self._observed_launches[device.device_id] = {gid for gid, _ in witnesses}
         # Radio coordination makes the seen launch take priority over its pulses.
         self._diversion_assignments[device.device_id] = {}
@@ -1097,33 +1137,9 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
     def _leave_blood_trail(self, old: np.ndarray) -> None:
         speed = float(np.linalg.norm(self.env.player_pos - old)) / self.game_dt
         loss = self.player_vitals.step_bleeding(self.game_dt, speed)
-        self._wound_trail.deposit(self.blood, old, self.env.player_pos, loss, self._new_id)
-        # Stepping through a dead enemy's blood stains shoes even if the kill
-        # happened at range. Check the movement segment so a dive cannot skip it.
-        delta = self.env.player_pos - old
-        for body in self.bodies:
-            if not body.lethal:
-                continue
-            t = np.clip(np.dot(body.pos - old, delta) / max(float(np.dot(delta, delta)), 1e-7), 0., 1.)
-            nearest = old + delta * t
-            if np.linalg.norm(nearest - body.pos) <= .85 and line_clear(self.env.grid, nearest, body.pos):
-                if self.bloody_timer <= 0:
-                    self.last_blood_pos = None
-                self.bloody_timer = 22.0
-                break
-        if self.bloody_timer <= 0.0:
-            return
-        self.bloody_timer = max(0.0, self.bloody_timer - self.game_dt)
-        moved = float(np.linalg.norm(self.env.player_pos - old))
-        if moved <= 1e-5:
-            return
-        if (
-            self.last_blood_pos is None
-            or float(np.linalg.norm(self.env.player_pos - self.last_blood_pos)) >= 0.52
-        ):
-            mark = self.env.player_pos.copy()
-            self.blood.append(BloodMark(self._new_id(), mark))
-            self.last_blood_pos = mark
+        self._wound_trail.deposit(self.blood, old, self.env.player_pos, loss, self._new_id,
+            wound_damage=self.player_vitals.wound_damage, injuries=self.player_vitals.consume_wounds())
+        self._leave_footprints(old,self.env.player_pos)
 
     def _player_grid(self):
         if self.level != 2 or self.archive_unlocked:
@@ -1146,6 +1162,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
 
     def _apply_player(self, inp: InputState) -> None:
         old = self.env.player_pos.copy()
+        self._age_blood()
         self._prepare_condition_input(inp)
         self.player_vitals.step_smoke(smoke_density(old, self.smoke_clouds), self.game_dt)
         self.player_actions.step(inp, old, self.game_dt)
@@ -1164,6 +1181,12 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
             near_object=any(self.env.episode_has_intel[i] and not self.env.player_has_intel[i]
                 and np.linalg.norm(old - point) <= 1.05 and line_clear(self.env.grid, old, point)
                 for i, point in enumerate(self.env._intel)))
+        if inp.drop_item and not self.player_actions.movement_locked and self.takedown is None:
+            kind = self.equipment.drop_selected(old, self.pickups, self.env.steps)
+            if kind:
+                if kind == 'SECURITY_CARD':
+                    self.campaign_items.discard('SECURITY_CARD')
+                self.message = f"LASCIATO: {kind}"
         self._player_extra_items(inp)
         if self.player_actions.station_id and self.player_vitals.treatment == 'MEDKIT':
             self.medical_watch.used.add(self.player_actions.station_id)
@@ -1174,7 +1197,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         locked = self.takedown is not None or self.player_actions.movement_locked
         boost = self.player_vitals.boost_remaining > 0
         sprinting = self.player_vitals.step(inp.sprint and moving and not inp.crouch and not compliant and not locked,
-                                           self.game_dt, drain=0.22 if boost else 0.16)
+                                           self.game_dt, drain=0.22 if boost else 0.16, moving=moving and not locked)
         if compliant or locked:
             speed = 0.0
         elif inp.crouch:
@@ -1186,6 +1209,8 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         else:
             speed = float(self.env.cfg.player_walk_speed)
         speed *= self.player_vitals.speed_multiplier
+        speed *= self.equipment.movement_factor
+        speed *= self.equipment.backpack_movement_factor
 
         if self.player_flash_timer > 0:
             speed *= 0.28
@@ -1210,7 +1235,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         )
 
         if inp.interact and not self._interact_latch:
-            self._collect_pickups()
+            recovered_intel = False
             for idx, pedestal in enumerate(self.env._intel):
                 if not self.env.episode_has_intel[idx] or self.env.player_has_intel[idx]:
                     continue
@@ -1223,19 +1248,25 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                     if self.level == 3 and not (self.equipment.hazmat and self.equipment.sample_vial):
                         self.message = "SERVONO PROTEZIONE E PROVETTA STERILE"
                         break
+                    if self.level == 1 and not self.equipment.collect('SECURITY_CARD', 1):
+                        self.message = "ZAINO PIENO · G PER FARE POSTO ALLA SCHEDA"
+                        break
                     self.env.player_has_intel[idx] = 1
                     if self.level == 1:
                         self.campaign_items.add('SECURITY_CARD')
                         self.equipment.security_card = True
                     if self.level == 3:
-                        self.equipment.sample_vial = False
+                        self.equipment.consume_item('SAMPLE_VIAL')
                     self.message = "OBIETTIVO RECUPERATO"
+                    recovered_intel = True
                     break
+            if not recovered_intel:
+                self._collect_pickups()
         self._interact_latch = inp.interact
         self._leave_blood_trail(old)
         used_station = self.player_actions.treatment_step(self.player_vitals, self.pickups, self.game_dt)
         if used_station:
-            self.medical_watch.used.add(used_station)
+            self.medical_watch.consume(used_station)
         if self.player_vitals.bleeding <= 0:
             self._wound_trail.pending = 0.0
         self._craft_or_throw(inp)
@@ -1303,15 +1334,26 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         for camera in self.cameras:
             camera.step(self.game_dt)
             if not camera.online:
+                camera.tracking = False
+                camera.confidence = 0.
                 continue
-            visible = not self.spawn_protected and can_see(
-                self.env.grid,
-                camera.pos,
-                camera.angle,
-                player,
-                camera.vision_range,
-                camera.fov,
-            )
+            observes = lambda point: (camera.sees(self.env.grid, point)
+                                      and not self._smoke_blocks(camera.pos, point))
+            self._inspect_missing_intel(camera.camera_id, observes)
+            for body in self.bodies:
+                if body.discovered or not observes(body.pos):
+                    continue
+                body.discovered = True
+                self._raise_evidence_alert("BODY FOUND", body.pos, camera.camera_id)
+                condition = "morta" if body.lethal else "incosciente"
+                self.guard_dialogue[camera.camera_id] = f"Telecamera: guardia {condition} a terra. Inviate una pattuglia."
+                self._dialogue_timer = 7.
+                self.radio_updates += 1
+            if np.linalg.norm(player-camera.pos) <= camera.blind_radius:
+                camera.tracking = False
+                camera.confidence = 0.
+                continue
+            visible = not self.spawn_protected and camera.sees(self.env.grid, player)
             visible = visible and not self._smoke_blocks(camera.pos, player)
             if visible:
                 distance = float(np.linalg.norm(player - camera.pos))
@@ -1350,6 +1392,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
             repeated = self._diversion_counts[investigator] >= 2
             if repeated:
                 self.security_compromised = True
+                self.security_cycle.caution()
                 self.guard_dialogue[investigator] = "C'è qualcosa di strano. Vieni a coprirmi."
             elif len(heard) >= 2:
                 self.guard_dialogue[investigator] = (
@@ -1385,7 +1428,12 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         if self.spawn_protected:
             return None
         heard: list[tuple[float, np.ndarray, str]] = []
+        firearm_cue = self._heard_firearm(observer_id, observer)
+        if firearm_cue is not None:
+            heard.append((-1., firearm_cue[0], firearm_cue[1]))
         for event in self.noise_events:
+            if hasattr(event, 'owner'):
+                continue
             distance = float(np.linalg.norm(event.pos - observer))
             key = event.device_id if event.device_id is not None else event.event_id
             assigned = event.source == "NOISEMAKER" and observer_id in self._diversion_assignments.get(key, {})
@@ -1393,6 +1441,8 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                 if event.source == "NOISEMAKER":
                     key = event.device_id if event.device_id is not None else event.event_id
                     goal = self._diversion_assignments.get(key, {}).get(observer_id)
+                    if self.facility_alert == 'SUSPICIOUS':
+                        goal = event.pos
                     if goal is None:
                         continue
                     heard.append((distance, goal, event.source))
@@ -1419,7 +1469,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         if not heard:
             return None
         distance, pos, source = min(heard, key=lambda item: item[0])
-        sigma = 0.12 + min(1.2, distance * 0.08)
+        sigma = 0.12 + min(1.2, max(0., distance) * 0.08)
         noisy = pos + self.rng.normal(0.0, sigma, size=2).astype(np.float32)
         x, y = self.env._cell(noisy)
         if not self.env._free(x, y) or not line_clear(self.env.grid, pos, noisy):
@@ -1427,6 +1477,8 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         return noisy, source
 
     def _start_guard_search(self, guard: SecurityGuard, anchor: np.ndarray) -> None:
+        if guard.state in {'CHASE', 'REPOSITION'}:
+            self._radio(guard.guard_id, 'Ho perso il contatto visivo. Controllo l’ultima posizione nota.')
         anchor = self._navigable_goal(anchor)
         guard.state = "SEARCH"
         guard.last_seen = anchor.copy()
@@ -1470,7 +1522,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         if not pending or self.team_contact is None or self.team_contact_age <= 12.:
             return
         guards = self._active_guards()
-        searching = {"CHASE", "REPOSITION", "RESPOND", "SEARCH", "VERIFY", "STACK", "CLEAR ROOM", "SUPPORT", "TRACK BLOOD", "INSPECT BODY", "INVESTIGATE", "FLANK"}
+        searching = {"CHASE", "REPOSITION", "RESPOND", "SEARCH", "VERIFY", "STACK", "CLEAR ROOM", "SUPPORT", "TRACK BLOOD", "INSPECT BODY", "INVESTIGATE", "FLANK", "WAIT REPORT", "INVESTIGATE FOR ALLY", "REPORTING"}
         if self.radio_timer is not None or any(g.seeing_player or g.state in searching for g in guards):
             return
         # A fresh squad is requested as soon as the unsuccessful search ends.
@@ -1484,7 +1536,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         self.radio_updates += 1
 
     def _detect_evidence(self, guard: SecurityGuard) -> bool:
-        if guard.blinded_timer > 0:
+        if not guard.active or guard.blinded_timer > 0 or guard.vitals.hit_stun_remaining > 0:
             return False
         for body in self.bodies:
             if body.discovered:
@@ -1496,7 +1548,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                 body.pos,
                 8.0,
                 115.0,
-            ):
+            ) and not self._smoke_blocks(guard.pos, body.pos):
                 body.discovered = True
                 guard.state = "INSPECT BODY"
                 guard.target = body.pos.copy()
@@ -1505,58 +1557,72 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                 self.radio_updates += 1
                 return True
 
+        if guard.guard_id.startswith('S') and self.team_contact is not None and self.team_contact_age <= .5:
+            return False
         mark = observe_blood(self.blood, self.env.grid, guard.pos, guard.angle,
-                             guard.guard_id, guard.evidence_id, self._smoke_blocks)
+                             guard.guard_id, guard.evidence_id, self._smoke_blocks,
+                             include_shared=guard.guard_id.startswith('S'))
         if mark is not None:
             guard.evidence_id = mark.mark_id
             guard.state = "TRACK BLOOD"
             guard.target = mark.pos.copy()
+            guard.blood_target = mark.pos.copy()
+            guard.last_seen,guard.last_seen_age = mark.pos.copy(),0.
             guard.suspicion = max(guard.suspicion, 0.85)
             self._raise_evidence_alert("BLOOD TRAIL")
+            if guard.guard_id.startswith('S'):
+                self.guard_dialogue[guard.guard_id] = 'Tracce di sangue. Nessun contatto visivo, seguiamo la pista.'
+                self._dialogue_timer = 8.
+                self.radio_updates += 1
+                for _, other in self.swat_units:
+                    if other is guard or not other.active or other.visual_confidence >= .25 or other.state in {'LEAVING','EXITED'}:
+                        continue
+                    other.state,other.target = 'RESPOND',mark.pos.copy()
+                    other.last_seen,other.last_seen_age = mark.pos.copy(),0.
             return True
         return False
 
     def _guard_goal_from_radio(self, guard: SecurityGuard) -> None:
-        if self.team_contact is None:
+        assignment = self._security_assignment(guard)
+        if assignment is None:
+            guard.state, guard.target = 'PATROL', guard.patrol_target()
             return
-        # Split security between remaining objectives and the extraction route.
-        points = [p for i, p in enumerate(self.env._intel)
-                  if self.env.episode_has_intel[i] and self.env.known_intel_present[i]]
-        points.append(self.env._exit)
-        index = max(0, int(guard.guard_id[1:]) - 1) % len(points)
-        if guard.target is None or not np.array_equal(guard.target, points[index]):
-            guard.pause_angle = guard.angle
-        guard.target = points[index].copy()
-        guard.state = "SECURE EXFIL" if index == len(points) - 1 else "PROTECT INTEL"
-        guard.last_seen = self.team_contact.copy()
-        guard.last_seen_age = self.team_contact_age
+        if guard.target is None or not np.array_equal(guard.target, assignment['goal']):
+            guard.pause_angle = self._security_heading(assignment)
+        guard.target, guard.state = assignment['goal'].copy(), assignment['state']
 
     def _inspect_guard_intel(self, guard: SecurityGuard) -> None:
         if not guard.active or guard.blinded_timer > 0 or guard.vitals.hit_stun_remaining > 0:
             return
+        self._inspect_missing_intel(guard.guard_id, lambda point: (
+            can_see(self.env.grid, guard.pos, guard.angle, point,
+                    GUARD_VISION_RANGE * (.85 if guard.has_shield else 1.),
+                    GUARD_FOV - (20. if guard.has_shield else 0.), self.env.cfg.vision_immediate)
+            and not self._smoke_blocks(guard.pos, point)))
+
+    def _inspect_missing_intel(self, source, observes) -> None:
         for index, point in enumerate(self.env._intel):
             if (not self.env.episode_has_intel[index] or not self.env.player_has_intel[index]
                     or index in self._intel_checks or index in self._reported_missing_intel):
                 continue
-            if (np.linalg.norm(guard.pos - point) > 1.15
-                    or not can_see(self.env.grid, guard.pos, guard.angle, point, 1.15, GUARD_FOV)
-                    or self._smoke_blocks(guard.pos, point)):
+            if not observes(point):
                 continue
             mission = MISSIONS[self.level]
             name = mission['names'][mission['indices'].index(index)]
-            self._intel_checks[index] = {"source": guard.guard_id, "remaining": 1.2, "name": name}
-            self.guard_dialogue[guard.guard_id] = f"{name} assente. Qualcuno di voi l'ha preso?"
+            self._intel_checks[index] = {"source": source, "remaining": 1.2, "name": name}
+            self.guard_dialogue[source] = f"{name} assente. Qualcuno di voi l'ha preso?"
             self._dialogue_timer = 5.
             self.radio_updates += 1
 
     def _step_intel_radio(self) -> None:
         guards = {guard.guard_id: guard for guard in self._active_guards()}
+        cameras = {camera.camera_id: camera for camera in self.cameras if camera.online}
         for index, call in list(self._intel_checks.items()):
             source = guards.get(call['source'])
-            if source is None:
+            if source is None and call['source'] not in cameras:
                 del self._intel_checks[index]
                 continue
-            if source.vitals.hit_stun_remaining > 0:
+            if source is not None and source.vitals.hit_stun_remaining > 0:
                 continue
             call['remaining'] -= self.game_dt
             if call['remaining'] > 1e-6:
@@ -1566,12 +1632,13 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
             if responders:
                 for responder in responders:
                     self.guard_dialogue[responder.guard_id] = "Negativo, non l'ho preso."
-                self.guard_dialogue[source.guard_id] = f"{call['name']} scomparso. Tutti in cautela."
+                self.guard_dialogue[call['source']] = f"Radio: è stato rubato l'intel ({call['name']}). Tutti in cautela."
             else:
-                self.guard_dialogue[source.guard_id] = "Nessuna conferma di recupero. Intel assente, cautela."
+                self.guard_dialogue[call['source']] = f"Radio: è stato rubato l'intel ({call['name']}). Nessuna conferma di recupero, tutti in cautela."
             self._reported_missing_intel.add(index)
             self.env.known_intel_present[index] = 0
             self.security_compromised = True
+            self.security_cycle.caution()
             self.threat_level = max(self.threat_level, 1)
             self.env.alert = max(int(self.env.alert), int(FacilityAlert.SUSPICIOUS))
             self.env.personal_suspicion = max(self.env.personal_suspicion, .48)
@@ -1682,22 +1749,37 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
             pos = self.navigator.move(guard.guard_id, guard.pos, goal, speed * self.game_dt)
             pos = self._motion_recovery.step(self.navigator, guard.guard_id, guard.pos, pos,
                 goal, speed, self.game_dt, True)
+            pos = self._friendly_flash_move(guard, guard.pos, pos)
             target = guard.last_seen if guard.last_seen is not None else goal
             heading = math.atan2(float(target[1] - pos[1]), float(target[0] - pos[0]))
             guard.vitals.step(running and np.linalg.norm(pos - guard.pos) > 1e-6,
-                              self.game_dt, drain=.14, fatigue_on_pause=False)
+                              self.game_dt, drain=.14, fatigue_on_pause=False, moving=np.linalg.norm(pos-guard.pos)>1e-6)
             return pos, turn_towards(guard.angle, heading, 4.0 * self.game_dt)
         motion = self._motions.setdefault(guard.guard_id, HumanMotion())
         moved, angle = motion.move(self.navigator, guard.guard_id, guard.pos, guard.angle,
                                    goal, speed, self.game_dt, turn_rate)
         moved = self._motion_recovery.step(self.navigator, guard.guard_id, guard.pos, moved, goal,
             speed, self.game_dt, goal is not None)
+        moved = self._friendly_flash_move(guard, guard.pos, moved)
+        for other in self._active_guards() if guard.state in {'CHASE', 'REPOSITION'} else ():
+            if other is guard or other.guard_id == guard.guard_id:
+                continue
+            if (np.linalg.norm(moved - other.pos) < .48
+                    and np.linalg.norm(moved - other.pos) < np.linalg.norm(guard.pos - other.pos) - 1e-5):
+                moved = guard.pos.copy()
+                break
         guard.vitals.step(running and np.linalg.norm(moved - guard.pos) > 1e-6,
-                          self.game_dt, drain=.14, fatigue_on_pause=False)
+                          self.game_dt, drain=.14, fatigue_on_pause=False, moving=np.linalg.norm(moved-guard.pos)>1e-6)
         return moved, angle
 
     def _step_guard_weapon(self, guard: SecurityGuard, confirmed: bool) -> None:
         guard.shot_cooldown = max(0.0, guard.shot_cooldown - self.game_dt)
+        if not self._swat_formation_can_fire(guard.guard_id, guard):
+            guard.aim_timer = 0.
+            return
+        if getattr(guard, '_incoming_cover', None) is not None or guard.state in CARE_STATES:
+            guard.aim_timer = 0.
+            return
         visible = confirmed and can_see(self.env.grid, guard.pos, guard.angle, self.env.player_pos,
                                        9.0 * (.85 if guard.has_shield else 1.), GUARD_FOV - (20. if guard.has_shield else 0.)) and not self._smoke_blocks(guard.pos, self.env.player_pos)
         recovering = self.player_actions.knockdown_remaining > 0 or self.player_actions.rise_timer > 0
@@ -1776,7 +1858,15 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
 
     def _step_tactical_entry(self, guard: SecurityGuard) -> bool:
         room = self._reported_room(self.team_contact) if self.team_contact is not None else None
-        if room is None or guard.state in {"CHASE", "WITHDRAW", "LEAVING", "EXITED"} or not guard.guard_id.startswith("S"):
+        if room is None or guard.state in {"WITHDRAW", "LEAVING", "EXITED"} or not guard.guard_id.startswith("S"):
+            return False
+        following_blood = any(unit.active and (unit.blood_target is not None or
+            (unit.evidence_id >= 0 and unit.state in {'TRACK BLOOD','SEARCH'})) for _,unit in self.swat_units)
+        if following_blood and not self._room_blockers(room):
+            return False
+        self._ensure_room_handover(room)
+        blockers = self._room_blockers(room)
+        if guard.state == 'CHASE' and not blockers:
             return False
         if guard.guard_id in self._room_entries and self._room_entries[guard.guard_id]["room"] != room:
             self._room_entries.pop(guard.guard_id)
@@ -1784,13 +1874,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         # Finish an ongoing entry, but do not open a new one on an expired report.
         if plan is None:
             x0, y0, x1, y1 = room
-            doors = [(np.array([x,y],dtype=np.float32), np.array(normal,dtype=np.float32))
-                     for x,y,normal in
-                     ([(x,y0,(0,1)) for x in range(x0+1,x1)] +
-                      [(x,y1,(0,-1)) for x in range(x0+1,x1)] +
-                      [(x0,y,(1,0)) for y in range(y0+1,y1)] +
-                      [(x1,y,(-1,0)) for y in range(y0+1,y1)])
-                     if self.env._free(x,y)]
+            doors = self._room_doors(room)
             if not doors:
                 return False
             teammates = [p for p in self._room_entries.values() if p["room"] == room]
@@ -1807,10 +1891,20 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                     "search": LocalSearch([door.copy()] + corners, scan_seconds=0.85),
                     "phase": "STACK", "wait": 0.6}
             self._room_entries[guard.guard_id] = plan
+        if plan["phase"] == "DONE" and blockers:
+            plan['phase'], plan['wait'] = 'STACK', .6
         if plan["phase"] == "DONE":
             return False
         guard.state = plan["phase"]
         goal, look = plan["stage"], None
+        if blockers:
+            guard.state = 'WAIT GUARDS'
+            guard.target = goal
+            guard.pos, guard.angle = self._guard_move(guard, goal, float(self.env.cfg.guard_speed) / self.game_dt * 1.65, 4.)
+            if np.linalg.norm(guard.pos - goal) < .3:
+                heading = math.atan2(float(self.team_contact[1]-guard.pos[1]), float(self.team_contact[0]-guard.pos[0]))
+                guard.angle = turn_towards(guard.angle, heading, 4. * self.game_dt)
+            return True
         if plan["phase"] == "STACK" and np.linalg.norm(guard.pos - goal) < 0.25:
             ready = all(
                 unit.guard_id in self._room_entries
@@ -1862,7 +1956,9 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         return True
 
     def _step_guard(self, guard: SecurityGuard, policy_action=None) -> None:
+        self._legacy_policy_overrides.add(guard.guard_id)
         guard.seeing_player = False
+        guard.lean_amount = 0.
         if not guard.active:
             return
         if guard.vitals.hit_stun_remaining > 0:
@@ -1870,6 +1966,8 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
             guard.vitals.step(False, self.game_dt, fatigue_on_pause=False)
             return
         if self.takedown and self.takedown["guard_id"] == guard.guard_id:
+            return
+        if self._step_incoming_cover(guard.guard_id, guard, guard.vitals):
             return
         if self._escape_guard_smoke(guard):
             return
@@ -1916,12 +2014,15 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                 guard.pause_remaining = 0.0
                 self._searches.pop(guard.guard_id, None)
                 guard.state = "CHASE"
+                guard.blood_target = None
                 guard.target = player.copy()
                 guard.last_seen = player.copy()
                 guard.last_seen_age = 0.0
                 guard.suspicion = 1.0
                 self._publish_contact(player, guard.guard_id)
             elif guard.visual_confidence >= 0.25:
+                if guard.state != 'VERIFY':
+                    self._radio(guard.guard_id, 'Ho visto qualcosa di sospetto. Verifico il punto, tenetevi pronti.')
                 guard.pause_remaining = 0.0
                 if guard.state != "VERIFY" or guard.target is None or np.linalg.norm(guard.target - player) > 1.5:
                     uncertainty = (1.0 - guard.visual_confidence) * 1.2
@@ -1939,13 +2040,18 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
             self._register_spot(guard.guard_id, guard.visual_confidence)
             if guard.state in {"CHASE", "REPOSITION"} and guard.last_seen is not None:
                 guard.fire_goal = None
-                self._start_guard_search(guard, guard.last_seen)
+                guard._engagement_goal = None
+                if not guard.guard_id.startswith('S') and self._player_identified:
+                    self._guard_goal_from_radio(guard)
+                else:
+                    self._start_guard_search(guard, guard.last_seen)
             elif guard.state == "VERIFY" and guard.target is not None and np.linalg.norm(guard.pos - guard.target) < .35:
                 self._start_guard_search(guard, guard.target.copy())
 
         if guard.visual_confidence < 1.0:
             cue = self._audible_cue(guard.pos, guard.guard_id)
-            if cue is not None and guard.guard_id not in self._launch_responses and guard.state not in {"CHASE", "RESPOND", "VERIFY", "PROTECT INTEL", "SECURE EXFIL"}:
+            delegated = cue is not None and self._delegate_noise(guard, cue[0], cue[1])
+            if cue is not None and not delegated and guard.guard_id not in self._launch_responses and guard.state not in {"CHASE", "RESPOND", "VERIFY", "PROTECT INTEL", "SECURE EXFIL"}:
                 if cue[1] != "NOISEMAKER":
                     self._local_diversion_guards.discard(guard.guard_id)
                 previous_state = guard.state
@@ -1953,6 +2059,8 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                 guard.state = "INVESTIGATE"
                 if previous_state != "INVESTIGATE" or guard.target is None or np.linalg.norm(guard.target - cue[0]) > 1.0:
                     guard.target = cue[0]
+                    if guard.guard_id not in self.guard_dialogue:
+                        self._radio(guard.guard_id, 'Ho sentito un rumore sospetto. Vado a controllare l’origine.')
                 guard.suspicion = max(guard.suspicion, 0.48)
                 if cue[1] == "BODY IMPACT":
                     guard.suspicion = max(guard.suspicion, 0.78)
@@ -1968,38 +2076,88 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                 guard.state = "FLANK"
                 guard.target = response["goal"].copy()
 
+        self._inspect_guard_intel(guard)
         if guard.state not in {"CHASE", "VERIFY"}:
             self._detect_evidence(guard)
-            self._inspect_guard_intel(guard)
+        if (guard.guard_id.startswith('G') and self._player_identified and not visible
+                and guard.state in {'CHASE', 'REPOSITION', 'FLANK', 'RESPOND', 'SUPPORT', 'SEARCH', 'TRACK BLOOD'}):
+            if guard.state == 'SEARCH':
+                self._report_empty_target(guard)
+            self._searches.pop(guard.guard_id, None)
+            guard.fire_goal, guard.blood_target, guard._engagement_goal = None, None, None
+            self._guard_goal_from_radio(guard)
+        if self._step_guard_room_order(guard):
+            return
+        if self._step_reload_cover(guard.guard_id, guard):
+            return
+        if self._step_noise_order(guard):
+            return
+        if self._step_regular_engagement(guard):
+            return
+        reported_room = self._reported_room(self.team_contact) if self.team_contact is not None else None
+        if guard.guard_id.startswith('S') and reported_room is not None and self._room_blockers(reported_room):
+            if self._step_tactical_entry(guard):
+                return
+        if guard.guard_id.startswith('S') and guard.blood_target is not None and guard.visual_confidence < .25:
+            if self.team_contact is not None and self.team_contact_age <= .5:
+                guard.blood_target = None
+                guard.state,guard.target = 'RESPOND',self.team_contact.copy()
+            else:
+                guard.state,guard.target = 'TRACK BLOOD',guard.blood_target.copy()
 
         if (
             self.team_contact is not None
             and guard.guard_id.startswith("G")
-            and self.swat_phase in {"DISPATCH", "ACTIVE"}
-            and guard.state in {"PATROL", "OBSERVE", "PROTECT INTEL", "SECURE EXFIL"}
+            and (self._player_identified or self.swat_phase in {"DISPATCH", "ACTIVE"})
+            and guard.state in {"PATROL", "OBSERVE", "PROTECT INTEL", "SECURE EXFIL", "WATCH MEDKIT"}
             and guard.visual_confidence < 1.0
         ):
             self._guard_goal_from_radio(guard)
 
+        if guard.state == 'SUPPORT INTEL':
+            self._step_swat_security_support(guard)
+
         # Every guard can execute the same intents. A policy chooses among
         # them; current perception and safety still override stale decisions.
+        if self._step_swat_formation(guard.guard_id, guard):
+            return
         if policy_action is not None:
             self._apply_guard_intent(guard, policy_action, visible)
 
+        context_active, context_consumed = self._step_context_tactics(guard.guard_id, guard)
+        if context_consumed:
+            return
+        medical_jobs = self._medical_jobs
+        ongoing_care = guard.guard_id in medical_jobs or any(job.get('helper') == guard.guard_id for job in medical_jobs.values())
+        emergency_care = guard.vitals.health < .2 and guard.vitals.bleeding > 0
+        if (not context_active or ongoing_care or emergency_care) and self._step_guard_medical(guard, visible):
+            return
+
         medical_goal = self.medical_watch.goal(guard.guard_id, guard.pos, visible,
                                                self.navigator.path_length)
+        post = (self._security_assignment(guard)
+                if guard.guard_id.startswith('G') and (medical_goal is not None or guard.state == 'WATCH MEDKIT')
+                else None)
+        if (medical_goal is None and guard.state == 'WATCH MEDKIT'
+                and (post is None or post['state'] != 'WATCH MEDKIT')):
+            guard.state, guard.target = 'PATROL', guard.patrol_target()
         medical_evidence = self.medical_watch.inspect(guard.guard_id,
             lambda p: can_see(self.env.grid,guard.pos,guard.angle,p,GUARD_VISION_RANGE,GUARD_FOV)
             and not self._smoke_blocks(guard.pos,p) and guard.blinded_timer <= 0)
         if medical_evidence is not None:
             self._raise_evidence_alert('MEDKIT USED', medical_evidence, guard.guard_id)
-            self._start_guard_search(guard, medical_evidence)
+            if guard.guard_id.startswith('G') and self._player_identified:
+                self._guard_goal_from_radio(guard)
+            else:
+                self._start_guard_search(guard, medical_evidence)
             self.guard_dialogue[guard.guard_id] = "Ha usato il medikit. È passato da qui!"
             self._dialogue_timer = 7.
             medical_goal = None
-        elif medical_goal is not None:
-            guard.state = 'WATCH MEDKIT'
-            guard.target = medical_goal
+        elif medical_goal is not None and guard.blood_target is None and not self._player_identified:
+            if post is not None:
+                guard.state, guard.target = post['state'], post['goal'].copy()
+            elif guard.guard_id.startswith('S'):
+                guard.state, guard.target = 'WATCH MEDKIT', medical_goal
 
         if medical_goal is None and self._step_tactical_entry(guard):
             return
@@ -2010,9 +2168,10 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                 guard.state = "REPOSITION"
             else:
                 guard.fire_goal = None
-        if (guard.guard_id.startswith("S") and guard.state not in {"CHASE", "WATCH MEDKIT"}
+        if (guard.guard_id.startswith("S") and guard.state not in {"CHASE", "WATCH MEDKIT", "TRACK BLOOD", "SUPPORT INTEL", "WITHDRAW", "LEAVING", "EXITED"}
                 and self.team_contact is not None and self.team_contact_age > 0.5):
-            trackers = [g for g in self.aux_guards if g.active and g.state in {"CHASE", "SEARCH"}
+            trackers = [g for _,g in self.swat_units
+                        if g.guard_id != guard.guard_id and g.active and g.state in {"CHASE", "SEARCH", "TRACK BLOOD"}
                         and g.last_seen is not None and g.last_seen_age < 8.0]
             if trackers:
                 tracker = min(trackers, key=lambda g: g.last_seen_age)
@@ -2023,12 +2182,14 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                     guard.target = guide.copy()
                     guard.state = "RESPOND"
         scan_angle = None
-        if guard.state == 'WATCH MEDKIT' and np.linalg.norm(guard.pos - guard.target) < 1.8:
-            scan_angle = math.atan2(float(guard.target[1]-guard.pos[1]),float(guard.target[0]-guard.pos[0]))
-            guard.target = guard.pos.copy()
+        if guard.state == 'WATCH MEDKIT' and np.linalg.norm(guard.pos - guard.target) < (.25 if post is not None else 1.8):
+            anchor = post['anchor'] if post is not None else guard.target
+            scan_angle = math.atan2(float(anchor[1]-guard.pos[1]),float(anchor[0]-guard.pos[0]))
+            if post is None:
+                guard.target = guard.pos.copy()
         elif guard.state in {"PATROL", "OBSERVE"}:
             guard.target, scan_angle = self._patrol_step(guard)
-        elif guard.state in {"PROTECT INTEL", "SECURE EXFIL"} and np.linalg.norm(guard.target - guard.pos) < 0.25:
+        elif guard.state in {"PROTECT INTEL", "SECURE EXFIL", "SUPPORT INTEL"} and np.linalg.norm(guard.target - guard.pos) < 0.25:
             scan_angle = guard.pause_angle + 1.15 * math.sin(self.env.steps * self.game_dt * 0.8)
         elif guard.state == "SEARCH":
             if guard.guard_id not in self._searches:
@@ -2043,8 +2204,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                 self._searches.pop(guard.guard_id, None)
                 if guard.guard_id.startswith("S"):
                     self._report_empty_target(guard)
-                    guard.state = "WITHDRAW"
-                    guard.target = guard.exit_pos if guard.exit_pos is not None else np.array([self.env.cfg.width - 1.0, 10.0], dtype=np.float32)
+                    self._finish_swat_security_search(guard)
                 else:
                     guard.suspicion = max(0.48 if self.security_compromised else 0.0, guard.suspicion * 0.5)
                     self._post_search_order(guard)
@@ -2059,10 +2219,12 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                 guard.state, guard.target = "PATROL", guard.patrol_target()
         elif guard.state == "TRACK BLOOD":
             mark = observe_blood(self.blood, self.env.grid, guard.pos, guard.angle,
-                                 guard.guard_id, guard.evidence_id, self._smoke_blocks)
+                                 guard.guard_id, guard.evidence_id, self._smoke_blocks,
+                                 include_shared=guard.guard_id.startswith('S'))
             if mark is not None:
                 guard.evidence_id = mark.mark_id
                 guard.target = mark.pos.copy()
+                guard.blood_target = mark.pos.copy()
 
         speed = float(self.env.cfg.guard_speed)
         if guard.guard_id.startswith("S"):
@@ -2090,12 +2252,45 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                 guard.state = "LEAVING"
             elif guard.state in {"INVESTIGATE", "VERIFY", "RESPOND", "FLANK", "INSPECT BODY", "SUPPORT", "TRACK BLOOD"}:
                 if guard.state != "VERIFY" or not visible:
+                    guard.blood_target = None
                     response = self._launch_responses.pop(guard.guard_id, None)
                     self._start_guard_search(guard, response["source"] if response is not None else guard.target)
+        if (guard.guard_id not in self._launch_responses
+                and guard.guard_id not in self._local_diversion_guards
+                and self._legacy_guard_choice_executed(guard, policy_action)):
+            self._legacy_policy_overrides.discard(guard.guard_id)
 
     def _step_aux_guard(self, guard: SecurityGuard) -> None:
-        action = None if guard.policy_action is None else TacticalAction(guard.policy_action)
+        choice = guard.policy_action if guard.policy_action is not None else self._aux_policy_actions.get(guard.guard_id)
+        action = None if choice is None else TacticalAction(choice)
         self._step_guard(guard, action)
+
+    def _policy_observation_for_guard(self, guard):
+        # Reuse the trained schema, temporarily adapting only this observer's
+        # knowledge. Retrospective player routes never enter a live observation.
+        env = self.env
+        visible = guard.seeing_player and not self.spawn_protected
+        sound = guard.state == 'INVESTIGATE' and guard.target is not None
+        fields = dict(guard_pos=guard.pos, guard_angle=guard.angle,
+            last_seen_pos=guard.last_seen, last_seen_age=guard.last_seen_age,
+            last_seen_velocity=np.zeros(2,dtype=np.float32), personal_suspicion=guard.suspicion,
+            intruder_known=self._player_identified, focus_visual_timer=1. if guard.state=='VERIFY' else 0.,
+            visual_exposure_count=self._strong_spots.get(guard.guard_id,0), audio_repeat_count=0,
+            buddy_available=False, buddy_pos=None, buddy_supporting=False, radio_reported=self.team_contact is not None,
+            sense=env.sense.__class__(visual=visible and guard.visual_confidence>=1., visual_candidate=visible,
+                visual_confidence=guard.visual_confidence if visible else 0.,
+                visual_rel=tuple(env.player_pos-guard.pos) if visible else (0.,0.),
+                visual_velocity=tuple(env.player_velocity) if visible else (0.,0.),
+                visual_band=int(VisualBand.MID) if visible else int(VisualBand.NONE),
+                motion_salience=min(1.,env.player_current_speed/2.5) if visible else 0.,
+                sound=sound, sound_rel=tuple(guard.target-guard.pos) if sound else (0.,0.),
+                sound_confidence=.7 if sound else 0.))
+        previous = {key:getattr(env,key) for key in fields}
+        try:
+            for key,value in fields.items(): setattr(env,key,value)
+            return env._observation().copy()
+        finally:
+            for key,value in previous.items(): setattr(env,key,value)
 
     def _apply_guard_intent(self, guard, action, visible):
         if self.spawn_protected or guard.state in {"ESCAPE SMOKE", "REPOSITION", "LEAVING", "EXITED"}:
@@ -2115,15 +2310,23 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                 guard.target = goal
         elif guard.state in {"PATROL", "OBSERVE", "PROTECT INTEL", "SECURE EXFIL"}:
             if action == TacticalAction.PROTECT_NEAREST_INTEL:
-                points = [p for i, p in enumerate(self.env._intel) if self.env.episode_has_intel[i] and self.env.known_intel_present[i]]
-                if points:
-                    guard.target = min(points, key=lambda p: self.navigator.path_length(guard.pos, p)).copy()
-                    guard.pause_angle = guard.angle
-                    guard.state = "PROTECT INTEL"
+                if not guard.guard_id.startswith('S'):
+                    self._guard_goal_from_radio(guard)
             elif action in {TacticalAction.GO_LAST_SEEN, TacticalAction.PURSUE, TacticalAction.SEARCH_LAST_SEEN} and point is not None:
-                self._start_guard_search(guard, point)
+                if guard.guard_id.startswith('S') or not self._player_identified:
+                    self._start_guard_search(guard, point)
 
     def _step_aux_guards(self) -> None:
+        if not self.spawn_protected and (self.policy_tick-1)%self.policy_every==0:
+            guards = [g for g in self.aux_guards+[u for _,u in self.swat_units] if g.active]
+            if guards:
+                observations = np.stack([self._policy_observation_for_guard(g) for g in guards])
+                actions,_ = self.model.predict(observations,deterministic=True)
+                choices = np.broadcast_to(np.asarray(actions).reshape(-1),(len(guards),))
+                for guard,observation,choice in zip(guards,observations,choices):
+                    intent = guard.policy_action if guard.policy_action is not None else int(choice)
+                    self._aux_policy_actions[guard.guard_id] = intent
+                    self.learning_decisions.append((observation,intent,guard.guard_id))
         for guard in self.aux_guards:
             self._step_aux_guard(guard)
 
@@ -2157,7 +2360,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                 body.pos,
                 8.0,
                 112.0,
-            ):
+            ) and not self._smoke_blocks(self.env.guard_pos, body.pos):
                 body.discovered = True
                 self._raise_evidence_alert("BODY FOUND", body.pos, "G0")
                 self.env.personal_suspicion = 1.0
@@ -2183,6 +2386,8 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
     def tick(self, inp: InputState) -> None:
         self.learning_decisions = []
         self.learning_events = []
+        self.context_decisions = []
+        self._legacy_policy_overrides = set()
         if self.status != "RUNNING":
             return
 
@@ -2207,6 +2412,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
         self._process_takedown(inp)
         self._step_diversions()
         self._step_cameras()
+        self._step_noise_radio()
 
         self.env.steps += 1
         self.env.search_completed_event = False
@@ -2284,6 +2490,7 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
             self._step_aux_guard(unit)
         self._step_swat_departures()
         self._step_intel_radio()
+        self._step_guard_recovery()
         if not self._lead_vitals_stepped:
             self._lead_patrol.vitals.step(False, self.game_dt, fatigue_on_pause=False)
         if self._primary_active():
@@ -2296,12 +2503,11 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
 
         self.team_contact_age += self.game_dt
         self._step_casualty_reinforcements()
+        self._step_security_cycle()
         self._update_facility_alert()
 
         for body in self.bodies:
             body.fall = max(0.0, body.fall - self.game_dt * (2.6 if body.lethal else 0.7))
-        for mark in self.blood:
-            mark.age += self.game_dt
 
         captured = self.player_vitals.health <= 0
         if not self.spawn_protected:
@@ -2347,6 +2553,13 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
 
     def _guard_state(self, guard: SecurityGuard) -> dict[str, Any]:
         return {
+            'lean_amount': float(getattr(guard, 'lean_amount', 0.)),
+            'formation': getattr(guard, 'formation', ''),
+            'suppression_timer': float(getattr(guard, 'suppression_timer', 0.)),
+            **self._enemy_weapon_state(guard.guard_id, guard),
+            'is_medic': guard.is_medic, 'medkits': guard.medkits,
+            'role': 'MEDIC' if guard.is_medic else 'GUARD',
+            "firearm": self._actor_firearm_snapshot(guard.guard_id, guard),
             **guard.vitals.snapshot(),
             "armor": guard.armor, "shield": guard.has_shield,
             "weapon": guard.weapon, "disarmed": guard.disarmed, "grenades": guard.grenade_count,
@@ -2370,7 +2583,8 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
             "vision_range": GUARD_VISION_RANGE * (.85 if guard.has_shield else 1.) * (1. - .95 * smoke_density(guard.pos, self.smoke_clouds)),
             "fov": GUARD_FOV - (20. if guard.has_shield else 0.),
             "vision_status": self._vision_status(guard.state, guard.visual_confidence >= 1.0, guard.suspicion),
-            "combat_alert": self.team_contact_source == "GUNFIRE" and self.facility_alert in {"CONTACT", "SEARCH"},
+            "combat_alert": ((guard.guard_id.startswith('S') and guard.state not in {'WITHDRAW','LEAVING','EXITED'})
+                             or self.team_contact_source == "GUNFIRE" and self.facility_alert in {"CONTACT", "SEARCH"}),
         }
 
     def state(self, include_static: bool = True) -> dict[str, Any]:
@@ -2388,6 +2602,8 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
             for idx, pos in enumerate(env._intel) if env.episode_has_intel[idx]
         ]
         primary = {
+            **self._enemy_weapon_state('G0', self._lead_patrol),
+            "firearm": self._actor_firearm_snapshot('G0', self._lead_patrol),
             **self._lead_patrol.vitals.snapshot(),
             "weapon": self._lead_patrol.weapon, "disarmed": self._lead_patrol.disarmed,
             "observed": self._player_observes(env.guard_pos),
@@ -2471,6 +2687,8 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                     "angle": _f(camera.angle),
                     "vision_range": _f(camera.vision_range),
                     "fov": _f(camera.fov),
+                    "vision_inner_range": _f(camera.blind_radius),
+                    "pan_degrees": math.degrees(camera.sweep * 2),
                     "confidence": _f(camera.confidence),
                     "tracking": bool(camera.tracking),
                     "online": bool(camera.online),
@@ -2490,10 +2708,8 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                 }
                 for body in self.bodies
             ],
-            "blood": [
-                {"id": mark.mark_id, "x": _f(mark.pos[0]), "y": _f(mark.pos[1]), "age": _f(mark.age)}
-                for mark in self.blood
-            ],
+            "blood": [mark.snapshot() for mark in self.blood if mark.active],
+            "casings": self._case_snapshot(),
             "diversions": [
                 {
                     "id": device.device_id,
@@ -2514,8 +2730,11 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                     "source": event.source,
                 }
                 for event in self.noise_events
+                if not getattr(event, 'masked', False)
             ],
             "security": {
+                "room_handover": self._room_handover_snapshot(),
+                "noise_delegations": self._noise_delegation_snapshot(),
                 "medical_evidence": len(self.medical_watch.discovered),
                 "swat_phase": self.swat_phase,
                 "radio_remaining": self.radio_timer,
@@ -2527,6 +2746,8 @@ class InteractiveGuardRuntime(RuntimeCombatSystems):
                 "source": self.team_contact_source,
                 "radio_updates": int(self.radio_updates),
                 "dialogue": dict(self.guard_dialogue),
+                "radio_log": self.radio_log.snapshot(),
+                "countdown": self.security_cycle.snapshot(),
                 "guards_active": sum(1 for guard in guards if guard["alive"] and not guard["unconscious"]),
                 "guards_down": sum(1 for guard in guards if not guard["alive"] or guard["unconscious"]),
                 "cameras_tracking": sum(1 for camera in self.cameras if camera.tracking),
@@ -2839,7 +3060,7 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
             unit.weapon = swat_loadout(unit.role.name, self.seed)
             unit.disarmed = False
             unit.grenade_count = 0 if unit.profile.has_shield else 1
-            unit.ammo = unit.max_ammo = 8 if unit.weapon == 'SHOTGUN' else 24
+            unit.ammo = unit.max_ammo = self._gun_capacity(unit.weapon) + 1
         self.shots = []
         self.flash_events = []
         self._fire_goals = {}
@@ -2922,9 +3143,10 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
         # Recover all moving intents, including loss of contact and smoke exits.
         unit.pos = self._motion_recovery.step(self.navigator, unit.uid, old, unit.pos,
             target, speed, self.game_dt, True)
+        unit.pos = self._friendly_flash_move(unit, old, unit.pos)
         if unit.uid not in self._unit_vitals_stepped:
             vitals.step(running and np.linalg.norm(unit.pos - old) > 1e-6,
-                        self.game_dt, drain=.14, fatigue_on_pause=False)
+                        self.game_dt, drain=.14, fatigue_on_pause=False, moving=np.linalg.norm(unit.pos-old)>1e-6)
             self._unit_vitals_stepped.add(unit.uid)
 
     def _swat_can_see_player(self, unit) -> bool:
@@ -2940,6 +3162,11 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
         for uid, unit in self.core.units.items():
             if uid not in self._departed:
                 self.core._sense_unit(unit)
+                firearm_cue = self._heard_firearm(uid, unit.pos)
+                if firearm_cue is not None and not unit.local_visual:
+                    unit.local_sound = True
+                    unit.local_sound_rel = firearm_cue[0] - unit.pos
+                    unit.local_sound_confidence = .8
                 if (not unit.local_visual and cue is not None
                         and np.linalg.norm(unit.pos - cue["pos"]) <= cue.get("radius", 14)):
                     unit.local_sound = True
@@ -2956,6 +3183,8 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
                     unit.local_sound = True
                     unit.local_sound_rel = self.core.player_pos-unit.pos
                     unit.local_sound_confidence = .7
+                if unit.local_sound and not unit.local_visual:
+                    self._radio(uid, 'Ho sentito un rumore sospetto. Controllo il settore, copritemi.')
 
     def _step_swat_medical_watch(self, uid):
         unit = self.core.units[uid]
@@ -2967,6 +3196,7 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
             self.message = 'MEDIKIT USATO — LA SWAT HA TROVATO LE TRACCE'
             self._searches[uid] = LocalSearch(local_search_points(self.core.map.grid,evidence,0),scan_seconds=1.2)
             self._equipment_alert = 'SUSPICIOUS'
+            self.security_cycle.caution()
             self._search_anchor = evidence.copy()
             self._withdrawals.discard(uid)
             return False
@@ -3009,19 +3239,26 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
                 and self.core.player_flash_timer <= 0)
 
     def _down_swat_player_target(self, unit, lethal):
+        # Incapacitated patients cannot remain active medical radio targets.
+        self._context_medical_jobs.pop(unit.uid, None)
+        self._unit_vitals[unit.uid].cancel_treatment()
+        weapons = self._enemy_inventory_loot(unit.uid, unit)
+        firearms = {kind: firearm for kind, _, firearm in weapons}
         unit.alive = False
         if lethal:
             unit.health = 0.
+            self.blood.append(BloodMark(self._new_blood_id(),unit.pos.copy(),kind='POOL',radius=.45,lifetime=60.))
         self.actions[unit.uid] = "DOWN" if lethal else "STUNNED"
-        for kind, amount in ((unit.weapon, unit.ammo), ("FLASH", unit.flash_count), ("SMOKE", unit.smoke_count), ("GRENADE", unit.grenade_count), ("MAGAZINE", 1)):
+        for kind, amount in ([(kind, amount) for kind, amount, _ in weapons] + [("FLASH", unit.flash_count), ("SMOKE", unit.smoke_count), ("GRENADE", unit.grenade_count), ("MAGAZINE", 1)]):
             if kind and (amount or kind in FIREARMS):
-                self.pickups.append(dict(id=f"{unit.uid}-{kind}", kind=kind, amount=amount, pos=unit.pos.copy(), source=unit.uid))
+                self.pickups.append(dict(id=f"{unit.uid}-{kind}", kind=kind, amount=amount, pos=unit.pos.copy(), source=unit.uid,
+                    **({'firearm': firearms[kind]} if kind in firearms else {})))
         unit.ammo = unit.flash_count = unit.smoke_count = 0
         unit.grenade_count = 0
         self.takedown = None
 
     def _swat_melee(self, inp):
-        if self.player_actions.movement_locked:
+        if self.player_actions.movement_locked or self.equipment.drawing:
             return
         targets = [u for uid, u in self.core.units.items() if u.alive and uid not in self._departed
                    and np.linalg.norm(u.pos - self.core.player_pos) <= 2.0
@@ -3070,7 +3307,7 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
 
     def _step_swat_blood(self, uid):
         unit = self.core.units[uid]
-        if unit.local_visual:
+        if unit.local_visual or (self.core.blackboard.contact_pos is not None and self.core.blackboard.contact_age <= .5):
             self._blood_targets.pop(uid, None)
             self._blood_searches.pop(uid, None)
             return False
@@ -3078,7 +3315,7 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
             return False
         mark = observe_blood(self.blood, self.core.map.grid, unit.pos, unit.angle,
                              uid, self._blood_progress.get(uid, -1),
-                             lambda a, b: not self.core.map.line_clear(a, b, self.core.smoke_clouds))
+                             lambda a, b: not self.core.map.line_clear(a, b, self.core.smoke_clouds), include_shared=True)
         if mark is not None:
             self._blood_progress[uid] = mark.mark_id
             self._blood_targets[uid] = mark.pos.copy()
@@ -3169,7 +3406,7 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
             old = unit.pos.copy()
             unit.pos = self.navigator.move(uid, unit.pos, goal, speed * self.game_dt)
             vitals.step(np.linalg.norm(unit.pos - old) > 1e-6, self.game_dt,
-                        drain=.14, fatigue_on_pause=False)
+                        drain=.14, fatigue_on_pause=False, moving=np.linalg.norm(unit.pos-old)>1e-6)
             self._unit_vitals_stepped.add(uid)
             heading = math.atan2(float(target[1] - unit.pos[1]), float(target[0] - unit.pos[0]))
             unit.angle = turn_towards(unit.angle, heading, 4.0 * self.game_dt)
@@ -3185,7 +3422,8 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
             if np.linalg.norm(item["pos"] - self.core.player_pos) > 1.2 or not self.core.map.line_clear(self.core.player_pos, item["pos"]):
                 continue
             kind = item["kind"]
-            if not self.equipment.collect(kind, item["amount"]):
+            if not self.equipment.collect(kind, item["amount"], item.get('firearm')):
+                self.message = "ZAINO PIENO · 10 POSTI · G PER LASCIARE L’OGGETTO SELEZIONATO"
                 continue
             collected.append(item["id"])
         self.pickups = [item for item in self.pickups if item["id"] not in collected]
@@ -3196,8 +3434,11 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
         if source == "SMOKE":
             if self._equipment_alert != "CONTACT":
                 self._equipment_alert = "SUSPICIOUS"
+                self.security_cycle.caution()
             return
         self._equipment_alert = "CONTACT"
+        self.security_cycle.contact()
+        self._radio('SWAT', 'Colpi nel settore. Intruso armato, posizione comunicata alla squadra.')
         bb = self.core.blackboard
         bb.alert = FacilityAlert.CONFIRMED
         bb.confirmed_intruder = True
@@ -3213,6 +3454,7 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
         self._searched_contact = None
 
     def _swat_player_equipment(self, inp):
+        self._step_player_firearm(inp)
         for device in self._thrown:
             device.flight = min(1., device.flight + self.game_dt / .42)
             device.pos = device.start + (device.target - device.start) * device.flight
@@ -3241,7 +3483,9 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
             for unit in self.core.units.values():
                 if unit.alive and np.linalg.norm(unit.pos - endpoint) < 3 and self.core.map.line_clear(unit.pos, endpoint):
                     unit.blinded_timer = 2.4
-        if (not inp.fire or not self.player_vitals.can_aim or self.equipment.fire_cooldown > 0
+        gun = self.equipment.gun()
+        if (not inp.fire or self.equipment.drawing or not self.player_vitals.can_aim or self.equipment.fire_cooldown > 0
+                or gun is None or gun.reload_mode or not gun.chamber
                 or not self.equipment.weapon or self.equipment.ammo <= 0
                 or self.player_actions.knockdown_remaining > 0 or self.player_actions.rise_timer > 0):
             return
@@ -3249,10 +3493,12 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
             return
         units = [u for u in self.core.units.values() if u.alive and u.uid not in self._departed]
         endpoint, unit = player_shot(self.core.map.grid,origin,aim,units,self.equipment.weapon,self.rng)
-        if not spend_energy(self.player_vitals, .08 if self.equipment.weapon in {'PISTOL','RIFLE'} else WEAPONS[self.equipment.weapon].energy):
+        if not spend_energy(self.player_vitals, .08 if base_weapon(self.equipment.weapon) in {'PISTOL','RIFLE'} else WEAPONS[self.equipment.weapon].energy):
             return
-        self.equipment.ammo -= 1
-        self.equipment.fire_cooldown = {'RIFLE':.2,'PISTOL':.45}.get(self.equipment.weapon,WEAPONS[self.equipment.weapon].cooldown)
+        if not self.equipment.fire():
+            return
+        self.equipment.fire_cooldown = {'RIFLE':.2,'PISTOL':.45}.get(base_weapon(self.equipment.weapon),WEAPONS[self.equipment.weapon].cooldown)
+        hit_reaction = unit is not None and self._incoming_hit_context(unit, self._unit_vitals[unit.uid], origin)
         if unit is not None:
             unit.health, self._unit_armor[unit.uid], effect = projectile_damage(unit.health,
                 self._unit_armor[unit.uid], self._unit_vitals[unit.uid], unit.profile.has_shield,
@@ -3260,12 +3506,16 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
             self.message = effect
             if unit.health <= 0:
                 self._down_swat_player_target(unit,True)
+            else:
+                self._react_to_incoming_hit(unit.uid, unit, self._unit_vitals[unit.uid], origin, hit_reaction)
         self.shots.append({"from": _vec(origin), "to": _vec(endpoint), "ttl": .12})
-        self._swat_security_event("GUNFIRE", origin)
+        self._record_ballistics(origin.copy(), endpoint, self.equipment.weapon,
+                               math.atan2(float(aim[1]-origin[1]), float(aim[0]-origin[0])), unit is not None)
 
     def _apply_player(self, inp: InputState) -> None:
         core = self.core
         old = core.player_pos.copy()
+        self._age_blood()
         self.player_vitals.health = core.player_health
         self._prepare_condition_input(inp)
         direction = inp.direction()
@@ -3279,6 +3529,10 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
         inp.aim_y = float(old[1] + math.sin(self.player_actions.angle) * 8.)
         self.player_actions.interaction(inp, old, self.game_dt, self.equipment, self.player_vitals,
             self.pickups, core.map.line_clear, busy=moving or inp.dive or inp.attack_held or self.player_actions.movement_locked)
+        if inp.drop_item and not self.player_actions.movement_locked and self.takedown is None:
+            kind = self.equipment.drop_selected(old, self.pickups, core.world_ticks)
+            if kind:
+                self.message = f"LASCIATO: {kind}"
         self._player_extra_items(inp)
         if self.player_actions.station_id and self.player_vitals.treatment == 'MEDKIT':
             self.medical_watch.used.add(self.player_actions.station_id)
@@ -3290,7 +3544,8 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
         boost = self.player_vitals.boost_remaining > 0
         sprinting = self.player_vitals.step(inp.sprint and moving and not inp.crouch and not core.player_compliant
                                            and not self.player_actions.movement_locked and self.takedown is None,
-                                           self.game_dt, drain=0.22 if boost else 0.16)
+                                           self.game_dt, drain=0.22 if boost else 0.16,
+                                           moving=moving and not self.player_actions.movement_locked)
         if core.player_compliant or self.player_actions.movement_locked or self.takedown is not None:
             speed = 0.0
         elif inp.crouch:
@@ -3303,6 +3558,8 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
             speed = core.cfg.player_walk_speed
 
         speed *= self.player_vitals.speed_multiplier
+        speed *= self.equipment.movement_factor
+        speed *= self.equipment.backpack_movement_factor
         if core.player_flash_timer > 0:
             speed *= core.cfg.player_flash_speed_multiplier
 
@@ -3324,13 +3581,13 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
         loss = self.player_vitals.step_bleeding(self.game_dt, float(np.linalg.norm(core.player_pos - old)) / self.game_dt)
         used_station = self.player_actions.treatment_step(self.player_vitals, self.pickups, self.game_dt)
         if used_station:
-            self.medical_watch.used.add(used_station)
+            self.medical_watch.consume(used_station)
         core.player_health = self.player_vitals.health
-        self._wound_trail.deposit(self.blood, old, core.player_pos, loss, self._new_blood_id)
+        self._wound_trail.deposit(self.blood, old, core.player_pos, loss, self._new_blood_id,
+            wound_damage=self.player_vitals.wound_damage,injuries=self.player_vitals.consume_wounds())
+        self._leave_footprints(old,core.player_pos)
         if self.player_vitals.bleeding <= 0:
             self._wound_trail.pending = 0.0
-        for mark in self.blood:
-            mark.age += self.game_dt
         if core.player_health <= core.cfg.player_neutralized_health:
             core.player_neutralized = True
         self._swat_player_equipment(inp)
@@ -3384,9 +3641,12 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
         else:
             self._confirmed_gap += self.game_dt
         for uid, vitals in self._unit_vitals.items():
-            vitals.health = core.units[uid].health
             if uid not in self._unit_vitals_stepped:
+                vitals.health = core.units[uid].health
                 vitals.step(False, self.game_dt, fatigue_on_pause=False)
+            if uid not in self._context_medical_jobs and vitals.treatment is None:
+                vitals.step_treatment(self.game_dt)
+            core.units[uid].health = vitals.health
 
         if not self.spawn_protected:
             melee_blocked = set()
@@ -3395,6 +3655,7 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
                 close_armed = (self.equipment.armed or recovering) and np.linalg.norm(unit.pos - core.player_pos) <= MELEE_RANGE
                 ready = (unit.alive and uid not in self._departed and unit.local_visual
                          and not core.player_compliant and unit.blinded_timer <= 0
+                         and uid not in self._context_medical_jobs
                          and not smoke_density(unit.pos, core.smoke_clouds)
                          and not (self.takedown and self.takedown['guard_id'] == uid))
                 melee = self._melee_attacks.setdefault(uid, EnemyMelee())
@@ -3409,10 +3670,14 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
             for uid, unit in core.units.items():
                 timer = max(0., self._enemy_fire_timers.get(uid, 0.) - self.game_dt)
                 self._enemy_fire_timers[uid] = timer
+                if getattr(unit, '_incoming_cover', None) is not None or uid in self._context_medical_jobs:
+                    continue
                 if not unit.alive or uid in self._departed or not unit.local_visual or uid in melee_blocked:
                     continue
                 vitals = self._unit_vitals[uid]
                 if not vitals.can_aim or unit.blinded_timer > 0 or smoke_density(unit.pos, core.smoke_clouds):
+                    continue
+                if not self._swat_formation_can_fire(uid, unit):
                     continue
                 distance = float(np.linalg.norm(unit.pos - core.player_pos))
                 if core.player_compliant or not self.equipment.armed:
@@ -3432,6 +3697,8 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
     def tick(self, inp: InputState) -> None:
         self.learning_decisions = []
         self.learning_events = []
+        self.context_decisions = []
+        self._legacy_policy_overrides = set()
         if self.status != "RUNNING":
             return
 
@@ -3484,6 +3751,7 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
 
         for uid in self.core.agent_ids:
             unit = self.core.units[uid]
+            unit.lean_amount = 0.
             if uid in self._departed:
                 continue
             if self.takedown and self.takedown["guard_id"] == uid:
@@ -3499,6 +3767,8 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
                 self._unit_vitals[uid].step(False, self.game_dt, fatigue_on_pause=False)
                 self._unit_vitals_stepped.add(uid)
                 continue
+            if self._step_incoming_cover(uid, unit, self._unit_vitals[uid]):
+                continue
             if smoke_density(unit.pos, self.core.smoke_clouds):
                 goal = getattr(unit, "smoke_goal", None)
                 if goal is None or smoke_density(goal, self.core.smoke_clouds):
@@ -3509,10 +3779,21 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
                 self._move_swat_unit(unit, goal)
                 continue
             unit.smoke_goal = None
+            if self._step_reload_cover(uid, unit) or self._step_swat_formation(uid, unit):
+                continue
+            _, context_consumed = self._step_context_tactics(uid, unit)
+            if context_consumed:
+                continue
             if self._step_swat_medical_watch(uid) or self._step_swat_firing_position(uid) or self._step_swat_blood(uid) or self._step_swat_withdrawal(uid) or self._step_swat_search(uid):
                 continue
 
             action_enum = self.cached_actions.get(uid, SwatAction.HOLD)
+            if action_enum == SwatAction.RELOAD and not unit.disarmed:
+                gun = self._enemy_gun(uid, unit)
+                if (gun.reload_mode or unit.ammo <= max(1, int(gun.capacity * .28))) and self._enemy_reload(uid, unit):
+                    self.actions[uid] = 'RELOAD'
+                    continue
+                action_enum = SwatAction.PURSUE if unit.local_visual else SwatAction.ADVANCE
             if unit.disarmed and action_enum == SwatAction.RELOAD:
                 action_enum = SwatAction.PURSUE
             if unit.local_visual and action_enum in {SwatAction.HOLD, SwatAction.WATCH_ENTRY, SwatAction.REGROUP}:
@@ -3532,13 +3813,14 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
                 vitals = self._unit_vitals[uid]
                 moving = np.linalg.norm(movement) > 1e-6
                 if uid not in self._unit_vitals_stepped:
-                    vitals.step(moving, self.game_dt, drain=.14, fatigue_on_pause=False)
+                    vitals.step(moving, self.game_dt, drain=.14, fatigue_on_pause=False, moving=moving)
                     self._unit_vitals_stepped.add(uid)
                     scale = vitals.speed_multiplier * (.5 if moving and not vitals.can_sprint else 1.)
                     unit.pos = before + movement * scale
 
         self.policy_tick += 1
         self._world_after_ai()
+        self._step_security_cycle()
 
         if self.core.player_captured:
             self.status = "CAPTURED"
@@ -3559,12 +3841,17 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
             unit = core.units[uid]
             units.append(
                 {
+                    "firearm": self._actor_firearm_snapshot(uid, unit),
+                    **self._enemy_weapon_state(uid, unit),
                     "id": uid,
                     **self._unit_vitals[uid].snapshot(),
                     "armor": self._unit_armor[uid], "shield": unit.profile.has_shield,
                     "weapon": unit.weapon, "disarmed": unit.disarmed, "grenades": unit.grenade_count,
                     "observed": self._player_observes(unit.pos),
                     "role": unit.role.name,
+                    'lean_amount': float(getattr(unit, 'lean_amount', 0.)),
+                    'formation': getattr(unit, 'formation', ''),
+                    'suppression_timer': float(getattr(unit, 'suppression_timer', 0.)),
                     "melee_windup": self._melee_attacks.get(uid, EnemyMelee()).windup,
                     "x": _f(unit.pos[0]),
                     "y": _f(unit.pos[1]),
@@ -3588,7 +3875,7 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
                     "vision_range": GUARD_VISION_RANGE * (.85 if unit.profile.has_shield else 1.) * (1. - .95 * smoke_density(unit.pos, core.smoke_clouds)),
                     "fov": GUARD_FOV - (20. if unit.profile.has_shield else 0.),
                     "vision_status": "ALERT" if unit.local_visual else "SUSPICIOUS",
-                    "combat_alert": self._equipment_alert == "CONTACT",
+                    "combat_alert": uid not in self._withdrawals,
                     "assigned_sector": int(unit.assigned_sector),
                     "assigned_feature_id": unit.assigned_feature_id,
                 }
@@ -3636,7 +3923,7 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
                 **self.player_vitals.snapshot(),
                 **self.player_actions.snapshot(),
                 "health": _f(core.player_health),
-                "bloody": self.player_vitals.bleeding > 0,
+                "bloody": self.bloody_timer > 0 or self.player_vitals.bleeding > 0,
                 **self.equipment.snapshot(),
                 "stolen_count": 0,
                 "flashed": core.player_flash_timer > 0.0,
@@ -3647,7 +3934,10 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
             "swat": units,
             "takedown": self.takedown,
             "diversions": [dict(id=d.device_id, landed=d.landed, pulses=0, **_vec(d.pos)) for d in self._thrown],
-            "blood": [dict(id=m.mark_id, age=m.age, **_vec(m.pos)) for m in self.blood],
+            "blood": [m.snapshot() for m in self.blood if m.active],
+            "casings": self._case_snapshot(),
+            "noise": [dict(id=e.event_id, **_vec(e.pos), radius=e.radius, ttl=e.ttl, source=e.source)
+                      for e in self.noise_events if not getattr(e, 'masked', False)],
             "shots": self.shots,
             "grenades": [g.snapshot() for g in self.explosives], "blasts": self.blasts,
             "pickups": [dict(id=item["id"], kind=item["kind"], amount=item["amount"], source=item["source"], fixed=item.get("fixed", False), zone=item.get("zone", ""), **_vec(item["pos"])) for item in self.pickups],
@@ -3662,7 +3952,10 @@ class InteractiveSwatRuntime(RuntimeCombatSystems):
                 "cleared_count": len(bb.cleared_feature_ids),
             },
             "security": {
-                "alert": "CONTACT" if self._equipment_alert == "CONTACT" else "CONTACT" if bb.contact_pos is not None and bb.contact_age <= .5 else "SEARCH" if any(search.index < len(search.points) for search in self._searches.values()) else "SUSPICIOUS",
+                "alert": self.security_cycle.phase,
+                "dialogue": dict(self._firearm_dialogue),
+                "radio_log": self.radio_log.snapshot(),
+                "countdown": self.security_cycle.snapshot(),
                 "contact": _vec(bb.contact_pos) or _vec(self._search_anchor),
                 "high_guard": True,
                 "swat_phase": "WITHDRAWN" if len(self._departed) == len(core.agent_ids) else "RETURNING" if self._withdrawals else "ACTIVE",

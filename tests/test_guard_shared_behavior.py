@@ -60,7 +60,9 @@ def test_all_sentries_accept_ai_defence_intent(game,sentry):
     game.env.player_pos = np.array([30.,25.],dtype=np.float32)
     game._step_guard(sentry,TacticalAction.PROTECT_NEAREST_INTEL)
     assert sentry.state == 'PROTECT INTEL'
-    assert any(np.array_equal(sentry.target,p) for p in game.env._intel)
+    post = game._security_assignment(sentry)
+    assert np.array_equal(sentry.target, post['goal'])
+    assert any(np.array_equal(post['anchor'], p) for p in game.env._intel)
 
 
 def test_all_sentries_cannot_aim_or_fire_exhausted(game,sentry):
@@ -87,3 +89,35 @@ def test_patrol_ai_can_select_the_same_defence_intent(game,sentry):
     sentry.policy_action = int(TacticalAction.PROTECT_NEAREST_INTEL)
     game._step_aux_guard(sentry)
     assert sentry.state == 'PROTECT INTEL'
+
+
+@pytest.mark.parametrize('state', ['PATROL', 'VERIFY', 'CHASE'])
+def test_all_sentries_notice_visible_missing_intel_during_other_tasks(game, sentry, state):
+    index = game.env.episode_intel_order[0]
+    game.env._intel[index] = sentry.pos + np.array([4., 0.], dtype=np.float32)
+    game.env.player_has_intel[index] = 1
+    game.env.player_pos = sentry.pos + np.array([8., 0.], dtype=np.float32)
+    sentry.state = state
+    sentry.visual_confidence = 1. if state == 'CHASE' else .3 if state == 'VERIFY' else 0.
+    sentry.target = game.env.player_pos.copy()
+    game._step_guard(sentry, TacticalAction.HOLD)
+    assert index in game._intel_checks
+    assert game._intel_checks[index]['source'] == sentry.guard_id
+
+
+@pytest.mark.parametrize('obstruction', ['facing_away', 'stunned', 'shield_fov'])
+def test_missing_intel_uses_the_sentry_actual_sensor_and_condition(game, sentry, obstruction):
+    index = game.env.episode_intel_order[0]
+    point = sentry.pos + np.array([4., 0.], dtype=np.float32)
+    if obstruction == 'facing_away':
+        sentry.angle = np.pi
+    elif obstruction == 'stunned':
+        sentry.vitals.hit_stun_remaining = 1.
+    else:
+        sentry.has_shield = True
+        point = sentry.pos + np.array([3., 3.], dtype=np.float32)
+    game.env._intel[index] = point
+    game.env.player_has_intel[index] = 1
+    game._inspect_guard_intel(sentry)
+    assert not game._intel_checks
+    assert game.env.known_intel_present[index]

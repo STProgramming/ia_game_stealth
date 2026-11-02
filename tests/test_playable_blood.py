@@ -134,6 +134,7 @@ def test_standalone_swat_hit_bleeds_tracks_and_can_be_treated():
     assert runtime.blood and runtime.core.player_health < .88
     unit = next(iter(runtime.core.units.values()))
     unit.local_visual = False
+    runtime.core.blackboard.contact_pos = None  # Lost contact: physical evidence now has priority.
     unit.pos = np.array([4., 10.], dtype=np.float32)
     unit.angle = 0
     assert runtime._step_swat_blood(unit.uid)

@@ -80,3 +80,25 @@ test("heard noises make only suspicious guards' cones yellow", () => {
   }
   assert.equal(run('agentPalette({confidence:0,vision_status:"NORMAL"}).color'), "rgb(146,216,248)");
 });
+
+test("the radar draws no objects, objectives, blood or combat effects", () => {
+  const run = radar();
+  run(`
+    state={mode:'guard',status:'RUNNING',map:{width:5,height:5,grid:Array.from({length:5},()=>Array(5).fill(0))},player:{x:2,y:2},security:{alert:'CALM'}};
+    for (const name of ['drawIntel','drawPickups','drawBlood','drawExplosives','drawSmoke','drawNoise','drawDiversions','drawBodies','drawExit','drawSemantic','drawZones']) {
+      globalThis[name]=()=>{throw Error('Unwanted radar layer: '+name)};
+    }
+    draw();
+  `);
+});
+
+test("alert and evasion completely suppress map, player, contacts and coordinates", () => {
+  const run = radar();
+  run(`drawSimpleRadar=()=>{throw Error('Radar data leaked while jammed')};`);
+  for (const security of [{alert:'CONTACT'}, {alert:'SEARCH',contact:{x:3,y:3}}, {swat_phase:'SPOTTED'}]) {
+    run(`state={mode:'guard',status:'RUNNING',map:{width:5,height:5,grid:[[0]]},player:{x:2,y:2},security:${JSON.stringify(security)}}; refreshUI(); draw();`);
+    assert.equal(run('document.getElementById("radarCoords").textContent'),'SEGNALE ASSENTE');
+  }
+  assert.equal(run(`radarDisturbed({mode:'guard',security:{alert:'SUSPICIOUS'}})`),false);
+  assert.equal(run(`radarDisturbed({mode:'guard',security:{alert:'CALM'}})`),false);
+});

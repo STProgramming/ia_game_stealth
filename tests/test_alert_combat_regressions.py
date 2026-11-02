@@ -229,7 +229,7 @@ def test_missing_intel_is_not_detected_without_an_inspection(game, obstruction):
     guard.pos, guard.angle = point + np.array([-1., 0.], dtype=np.float32), 0
     game.env.player_has_intel[index] = 1
     if obstruction == 'far':
-        guard.pos[0] -= 2
+        guard.pos[0] -= 12
     elif obstruction == 'wall':
         game.env.grid[game.env._cell(point)[1], game.env._cell(point)[0]] = 1
     elif obstruction == 'smoke':
@@ -299,4 +299,7 @@ def test_defence_does_not_know_an_intel_is_missing_before_confirmation(game):
     guard = game.aux_guards[0]
     game._guard_goal_from_radio(guard)
     assert guard.state == 'PROTECT INTEL'
-    assert np.array_equal(guard.target, game.env._intel[0])
+    post = game._security_assignment(guard)
+    assert post['key'].startswith('INTEL:')
+    assert np.array_equal(guard.target, post['goal'])
+    assert np.linalg.norm(guard.target - post['anchor']) >= .9

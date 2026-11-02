@@ -3,6 +3,7 @@ import numpy as np
 from dataclasses import dataclass
 from .soliton_security import line_clear
 from .playable_actions import spend_energy
+from .playable_firearms import VARIANTS, base_weapon
 
 
 MELEE_RANGE = 1.35
@@ -44,6 +45,7 @@ WEAPONS = {
     "SMG": WeaponProfile(.075, .16, .045, 11., .055),
     "ONE_HAND_SMG": WeaponProfile(.07, .19, .05, 9., .17),
 }
+WEAPONS.update({kind: WEAPONS[base] for kind, base in VARIANTS.items()})
 
 
 def swat_loadout(role, index=0):
@@ -54,7 +56,7 @@ def swat_loadout(role, index=0):
 
 def player_shot(grid, origin, aim, actors, weapon, rng):
     profile = WEAPONS[weapon]
-    if weapon in {'SHOTGUN', 'SMG', 'ONE_HAND_SMG'}:
+    if base_weapon(weapon) in {'SHOTGUN', 'SMG', 'ONE_HAND_SMG'}:
         delta = aim-origin
         distance = max(float(np.linalg.norm(delta)), 1e-6)
         side = np.array([-delta[1],delta[0]])/distance
